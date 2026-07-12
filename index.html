@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="CodeFerret — autonomous code review and bug-hunting plugin for Claude Code. Diff-scoped semantic review across logic, security, concurrency, performance, and API vectors.">
+<title>CodeFerret — Code Review Plugin for Claude Code</title>
+<style>
+  :root {
+    --ink: #1a1f2e;
+    --ink-soft: #4a5268;
+    --ink-faint: #8a91a5;
+    --paper: #ffffff;
+    --paper-warm: #f7f8fa;
+    --paper-edge: #e6e9f0;
+    --accent: #b4540a;
+    --accent-soft: #fdf1e7;
+    --ok: #1a7f4b;
+    --ok-soft: #e8f5ee;
+    --crit: #b3261e;
+    --crit-soft: #fdecea;
+    --warn: #9a6700;
+    --code-bg: #f2f4f8;
+    --term-bg: #1e2430;
+    --term-ink: #d8dee9;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--paper);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 1.5rem; }
+
+  header {
+    background: linear-gradient(180deg, var(--accent-soft) 0%, var(--paper) 100%);
+    border-bottom: 1px solid var(--paper-edge);
+    padding: 4.5rem 0 3.5rem;
+    text-align: center;
+  }
+  .mascot { font-size: 3.5rem; line-height: 1; }
+  h1 { font-size: 2.6rem; letter-spacing: -0.02em; margin-top: 0.75rem; }
+  .tagline { font-size: 1.2rem; color: var(--ink-soft); max-width: 620px; margin: 0.75rem auto 0; }
+  .badges { margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    font-size: 0.8rem; font-weight: 600; padding: 0.25rem 0.75rem;
+    border-radius: 999px; border: 1px solid var(--paper-edge);
+    background: var(--paper); color: var(--ink-soft);
+  }
+  .badge.green { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+  .cta-row { margin-top: 2rem; display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 0.65rem 1.4rem; border-radius: 8px;
+    font-weight: 600; font-size: 0.95rem; text-decoration: none;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-ghost { border: 1.5px solid var(--paper-edge); color: var(--ink); background: var(--paper); }
+
+  section { padding: 3.5rem 0; }
+  section + section { border-top: 1px solid var(--paper-edge); }
+  section.alt { background: var(--paper-warm); }
+  h2 { font-size: 1.7rem; letter-spacing: -0.01em; margin-bottom: 0.5rem; }
+  .lede { color: var(--ink-soft); margin-bottom: 2rem; max-width: 640px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }
+  .card {
+    background: var(--paper); border: 1px solid var(--paper-edge);
+    border-radius: 10px; padding: 1.25rem 1.4rem;
+  }
+  .card h3 { font-size: 1rem; margin-bottom: 0.35rem; }
+  .card p { font-size: 0.9rem; color: var(--ink-soft); }
+  .vec {
+    display: inline-block; font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
+    padding: 0.1rem 0.5rem; border-radius: 4px; margin-bottom: 0.6rem;
+    background: var(--accent-soft); color: var(--accent);
+  }
+
+  pre.shell {
+    background: var(--code-bg); border: 1px solid var(--paper-edge); border-radius: 10px;
+    padding: 1.1rem 1.3rem; font-family: var(--mono); font-size: 0.85rem;
+    overflow-x: auto; line-height: 1.7; color: var(--ink);
+  }
+  pre.shell .c { color: var(--ink-faint); }
+  code.inline {
+    font-family: var(--mono); font-size: 0.85em; background: var(--code-bg);
+    padding: 0.1em 0.4em; border-radius: 4px; border: 1px solid var(--paper-edge);
+  }
+  .steps { counter-reset: step; list-style: none; margin-top: 1.5rem; }
+  .steps li { counter-increment: step; margin-bottom: 1.75rem; padding-left: 3rem; position: relative; }
+  .steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 0.1rem;
+    width: 2rem; height: 2rem; border-radius: 50%; background: var(--accent); color: #fff;
+    font-weight: 700; font-size: 0.9rem; display: flex; align-items: center; justify-content: center;
+  }
+  .steps h3 { font-size: 1.05rem; margin-bottom: 0.4rem; }
+  .steps p { font-size: 0.92rem; color: var(--ink-soft); margin-bottom: 0.6rem; }
+
+  .cmd-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .cmd-table th, .cmd-table td { text-align: left; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--paper-edge); vertical-align: top; }
+  .cmd-table th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-faint); }
+  .cmd-table code { font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
+  .table-scroll { overflow-x: auto; }
+
+  .term {
+    background: var(--term-bg); border-radius: 10px; padding: 1.2rem 1.4rem;
+    font-family: var(--mono); font-size: 0.82rem; line-height: 1.75;
+    color: var(--term-ink); overflow-x: auto; margin-top: 1rem;
+  }
+  .term .crit { color: #ef6a5e; font-weight: 700; }
+  .term .loc { color: #88c0f0; }
+  .term .dim { color: #7b8497; }
+  .term .pass { color: #66d19e; font-weight: 700; }
+
+  .results-list { list-style: none; margin-top: 1.5rem; }
+  .results-list li {
+    display: flex; gap: 0.8rem; align-items: flex-start;
+    padding: 0.85rem 0; border-bottom: 1px solid var(--paper-edge); font-size: 0.94rem;
+  }
+  .results-list li:last-child { border-bottom: none; }
+  .tick {
+    flex: none; width: 1.5rem; height: 1.5rem; border-radius: 50%; margin-top: 0.1rem;
+    background: var(--ok-soft); color: var(--ok); font-weight: 700; font-size: 0.85rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .results-list strong { display: block; }
+  .results-list span { color: var(--ink-soft); font-size: 0.88rem; }
+
+  .note {
+    background: var(--accent-soft); border-left: 4px solid var(--accent);
+    border-radius: 0 8px 8px 0; padding: 0.9rem 1.2rem; font-size: 0.9rem;
+    color: var(--ink-soft); margin-top: 1.5rem;
+  }
+  .note strong { color: var(--ink); }
+
+  footer {
+    border-top: 1px solid var(--paper-edge); padding: 2.5rem 0; text-align: center;
+    color: var(--ink-faint); font-size: 0.85rem;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+
+  @media (max-width: 600px) {
+    h1 { font-size: 2rem; }
+    header { padding: 3rem 0 2.5rem; }
+    section { padding: 2.5rem 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="mascot" role="img" aria-label="ferret">🦡</div>
+    <h1>CodeFerret</h1>
+    <p class="tagline">An autonomous code review and bug-hunting plugin for Claude Code. It reviews your diff — not your whole repo — and only reports bugs it can prove.</p>
+    <div class="badges">
+      <span class="badge">v0.1.0</span>
+      <span class="badge green">✓ All local tests passing</span>
+      <span class="badge">Claude Code Plugin</span>
+    </div>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="#install">Install</a>
+      <a class="btn btn-ghost" href="https://github.com/musicofthings/code-ferret">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>Five detection vectors, zero style nitpicks</h2>
+    <p class="lede">CodeFerret targets deep semantic flaws that compilers and linters miss. Anything a linter already enforces is deduplicated away, and every finding carries a confidence rating backed by a concrete failure scenario.</p>
+    <div class="grid">
+      <div class="card"><span class="vec">LOGIC</span><h3>Run-time integrity</h3><p>Off-by-one errors, boundary conditions, null/undefined flow, unhandled promises, resource leaks, infinite loops.</p></div>
+      <div class="card"><span class="vec">SECURITY</span><h3>Vulnerability trapping</h3><p>Hardcoded secrets, SQL injection, XSS, unsafe deserialization, OWASP Top&nbsp;10 patterns.</p></div>
+      <div class="card"><span class="vec">CONCURRENCY</span><h3>Asynchronous safety</h3><p>Race conditions, deadlocks, non-atomic read-modify-write, unsynchronized shared state.</p></div>
+      <div class="card"><span class="vec">PERFORMANCE</span><h3>Resource conservation</h3><p>O(N²) loops over unbounded data, N+1 query patterns, redundant allocations.</p></div>
+      <div class="card"><span class="vec">API</span><h3>Contract enforcement</h3><p>Breaking public API changes, type-safety violations, third-party SDK misuse.</p></div>
+      <div class="card"><span class="vec">NOISE&nbsp;CONTROL</span><h3>False-positive cache</h3><p>Dismiss a finding once and its structural pattern is suppressed in every future review. Commit the cache to share with your team.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p class="lede">Requires <a href="https://claude.com/claude-code">Claude Code</a>. Installation takes under a minute — run these inside any Claude Code session.</p>
+    <ol class="steps">
+      <li>
+        <h3>Add the marketplace</h3>
+        <p>Registers this GitHub repository as a plugin source.</p>
+        <pre class="shell">/plugin marketplace add musicofthings/code-ferret</pre>
+      </li>
+      <li>
+        <h3>Install the plugin</h3>
+        <pre class="shell">/plugin install code-ferret@code-ferret-marketplace</pre>
+      </li>
+      <li>
+        <h3>Review your changes</h3>
+        <p>Open a new session in any git repository and run:</p>
+        <pre class="shell">/code-ferret:review          <span class="c"># uncommitted changes vs HEAD</span>
+/code-ferret:review staged   <span class="c"># staged changes only</span>
+/code-ferret:review main     <span class="c"># everything on your branch vs main</span></pre>
+      </li>
+    </ol>
+
+    <h2 style="margin-top:2.5rem">Commands</h2>
+    <div class="table-scroll">
+    <table class="cmd-table">
+      <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>/code-ferret:review</code></td><td>Full semantic review of the diff. Prints a report with clickable <code>file:line:col</code> locations, severity and confidence per finding, and ready-to-apply patches. Findings are saved to <code>.ferret/last-review.json</code>.</td></tr>
+        <tr><td><code>/code-ferret:triage</code></td><td>Steps through findings one by one: <strong>Accept &amp; apply patch</strong>, <strong>Ignore pattern</strong> (suppresses it forever), <strong>Discuss</strong>, or <strong>Skip</strong>.</td></tr>
+        <tr><td><code>/code-ferret:precommit</code></td><td>Fast staged-only check for commit blockers — secrets and high-confidence critical bugs. Verdict is a single <code>FERRET: PASS</code> or <code>FERRET: BLOCK</code> line.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note">
+      <strong>Built-in commit guard:</strong> once installed, a hook scans staged changes for credentials (GitHub, AWS, Anthropic, Slack tokens, private keys) whenever Claude Code runs <code class="inline">git commit</code> — and blocks the commit if any are found. No LLM call, no latency. Add a <code class="inline">.ferretignore</code> file (gitignore syntax) to exclude generated files from review.
+    </div>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <h2>Verified test results</h2>
+    <p class="lede">Before release, the installed plugin was tested end-to-end against a repository seeded with three real bugs — an SQL injection, a balance-debit race condition, and an off-by-one crash. It found all three:</p>
+
+    <div class="term">
+<span class="crit">[CRITICAL · SECURITY · HIGH]</span> <span class="loc">src/app.py:2:23</span><br>
+&nbsp;&nbsp;SQL injection via f-string query construction<br>
+&nbsp;&nbsp;<span class="dim">Input like x' OR '1'='1 returns arbitrary rows. Previous version was parameterized.</span><br>
+<br>
+<span class="crit">[CRITICAL · CONCURRENCY · HIGH]</span> <span class="loc">src/app.py:6:15</span><br>
+&nbsp;&nbsp;Race condition in balance debit read-modify-write<br>
+&nbsp;&nbsp;<span class="dim">Two concurrent debits both read the same balance; one deduction is silently lost.</span><br>
+<br>
+<span class="crit">[CRITICAL · LOGIC · HIGH]</span> <span class="loc">src/app.py:11:9</span><br>
+&nbsp;&nbsp;Off-by-one causes IndexError in last_items<br>
+&nbsp;&nbsp;<span class="dim">range(…, len(items)+1) indexes items[len(items)] — crashes on every call.</span><br>
+<br>
+3 critical · 0 warnings · 0 suggestions <span class="dim">(0 suppressed, 0 deduped)</span>
+    </div>
+
+    <ul class="results-list">
+      <li><span class="tick">✓</span><div><strong>Detection — 3 of 3 planted bugs found</strong><span>SQL injection, concurrency race, and logic crash all reported at CRITICAL severity with HIGH confidence, each with a concrete failure scenario.</span></div></li>
+      <li><span class="tick">✓</span><div><strong>Diff scoping &amp; ignore rules</strong><span>Only changed files were reviewed; a <code class="inline">generated/</code> directory listed in <code class="inline">.ferretignore</code> was correctly excluded from analysis.</span></div></li>
+      <li><span class="tick">✓</span><div><strong>Regression awareness</strong><span>Git history showed the previous version was parameterized and correct — the review used that to flag the injection and off-by-one as regressions.</span></div></li>
+      <li><span class="tick">✓</span><div><strong>Patches verified before offering</strong><span>Every suggested fix passed <code class="inline">git apply --check</code>. The triage "Accept &amp; apply" flow applied the SQL-injection fix cleanly and the file compiled.</span></div></li>
+      <li><span class="tick">✓</span><div><strong>False-positive suppression round trip</strong><span>Marking the race finding as "Ignore pattern" recorded its structural hash in <code class="inline">.ferret/review-cache.json</code>; a re-run confirmed it would be silently suppressed — even when line numbers shift.</span></div></li>
+      <li><span class="tick">✓</span><div><strong>Pre-commit secret guard</strong><span>A staged AWS access key was caught and the <code class="inline">git commit</code> was blocked with a <code class="inline">file:line</code> pointer to the credential. Committing after removal succeeded.</span></div></li>
+    </ul>
+
+    <div class="term" aria-label="pre-commit guard output">
+<span class="dim">$ git commit -m "add config"</span><br>
+CodeFerret blocked this commit: potential credentials in staged changes.<br>
+<span class="crit">SECRET</span> <span class="loc">src/config.py:1</span>: potential credential on added line<br>
+<br>
+<span class="dim">$ git commit -m "add config"   # after removing the key</span><br>
+<span class="pass">FERRET: PASS — safe to commit</span>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>Beyond your terminal</h2>
+    <p class="lede">The same review engine runs in CI and at the edge — both optional.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>GitHub Action</h3>
+        <p>Copy <code class="inline">examples/github-workflow.yml</code> into <code class="inline">.github/workflows/</code>, set the <code class="inline">ANTHROPIC_API_KEY</code> secret, and every pull request gets inline review comments automatically.</p>
+      </div>
+      <div class="card">
+        <h3>Cloudflare Worker proxy</h3>
+        <p>A zero-retention webhook middleware: verifies GitHub signatures, scrubs secrets to <code class="inline">[REDACTED_SECRET]</code> before anything reaches the LLM, posts inline PR comments, and reports Check Runs. Deploy from <code class="inline">worker/</code> with <code class="inline">wrangler deploy</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Native git hook</h3>
+        <p>Commit outside Claude Code? Install <code class="inline">examples/git-pre-commit-hook</code> as <code class="inline">.git/hooks/pre-commit</code> for the same secret guard in plain git.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>CodeFerret v0.1.0 · MIT-style open source · <a href="https://github.com/musicofthings/code-ferret">github.com/musicofthings/code-ferret</a></p>
+    <p style="margin-top:0.4rem">Built with <a href="https://claude.com/claude-code">Claude Code</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
