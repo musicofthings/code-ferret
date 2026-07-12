@@ -1,0 +1,23 @@
+name = "codeferret-proxy"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+[observability]
+enabled = true
+
+# Optional edge state. Bind these only if you use suppression sync / settings:
+# [[kv_namespaces]]
+# binding = "KV_SETTINGS"
+# id = "<your-kv-namespace-id>"
+#
+# [[d1_databases]]
+# binding = "D1_SUPPRESSIONS"
+# database_name = "codeferret"
+# database_id = "<your-d1-database-id>"
+# # Schema: CREATE TABLE suppressions (repo TEXT NOT NULL, hash TEXT NOT NULL,
+# #         reason TEXT, added_at TEXT, PRIMARY KEY (repo, hash));
+
+# Secrets — never put values in this file:
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put GITHUB_TOKEN
+#   npx wrangler secret put GITHUB_WEBHOOK_SECRET

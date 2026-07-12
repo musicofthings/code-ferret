@@ -1,0 +1,36 @@
+# CodeFerret PR review via GitHub Actions (alternative to the webhook Worker).
+# Copy to .github/workflows/code-ferret.yml in the target repository and set
+# the ANTHROPIC_API_KEY repository secret.
+name: CodeFerret Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run CodeFerret review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Run a CodeFerret-style semantic review of this pull request's diff
+            against the base branch. Analyze five vectors: LOGIC, SECURITY,
+            CONCURRENCY, PERFORMANCE, API. Only report issues caused by the
+            diff, each with a concrete failure scenario, severity
+            (CRITICAL/WARNING/SUGGESTION), confidence (HIGH/MEDIUM/LOW), and a
+            suggested fix as a diff. Never report style issues a linter would
+            catch. Redact any credential values as [REDACTED_SECRET]. Post
+            findings as inline PR review comments on the relevant lines.

@@ -1,0 +1,10 @@
+{
+  "name": "code-ferret",
+  "version": "0.1.0",
+  "description": "Autonomous code review and bug-hunting plugin. Diff-scoped semantic review across logic, security, concurrency, performance, and API-contract vectors, with confidence scoring, false-positive suppression, interactive triage, and a pre-commit secret guard.",
+  "author": {
+    "name": "Shibi Kannan",
+    "email": "shibi.kannan@gmail.com"
+  },
+  "keywords": ["code-review", "security", "sast", "bug-hunting", "pre-commit"]
+}

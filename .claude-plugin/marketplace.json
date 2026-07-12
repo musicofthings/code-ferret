@@ -1,0 +1,14 @@
+{
+  "name": "code-ferret-marketplace",
+  "owner": {
+    "name": "Shibi Kannan",
+    "email": "shibi.kannan@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "code-ferret",
+      "source": "./",
+      "description": "Autonomous code review and bug-hunting plugin for Claude Code."
+    }
+  ]
+}

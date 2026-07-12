@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Native git pre-commit hook for CodeFerret (works outside Claude Code too).
+# Install: cp examples/git-pre-commit-hook .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Set CODE_FERRET_ROOT to the plugin directory, e.g.
+#   ~/.claude/plugins/code-ferret  (or wherever this repo is cloned)
+set -uo pipefail
+
+CODE_FERRET_ROOT="${CODE_FERRET_ROOT:-$HOME/projects/code-ferret}"
+
+bash "$CODE_FERRET_ROOT/scripts/scan-secrets.sh" staged
+if [[ $? -eq 1 ]]; then
+  echo ""
+  echo "CodeFerret: commit blocked — potential credentials in staged changes." >&2
+  echo "Bypass (not recommended): git commit --no-verify" >&2
+  exit 1
+fi
+
+# Optional deep pre-commit review via Claude Code headless mode (slower):
+# claude -p "/code-ferret:precommit" || exit 1
+exit 0
