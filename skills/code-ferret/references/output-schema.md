@@ -3,6 +3,11 @@
 Every review produces two artifacts: a human-readable terminal report and a
 machine-readable findings file at `.ferret/last-review.json`.
 
+Installed analyzer results are written separately to
+`.ferret/tool-results.json`. The terminal report should summarize which tools
+passed, found issues, failed, or timed out, without duplicating their findings
+as semantic CodeFerret findings.
+
 ## Findings JSON (`.ferret/last-review.json`)
 
 ```json

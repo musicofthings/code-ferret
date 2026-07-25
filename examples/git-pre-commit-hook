@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
 # Native git pre-commit hook for CodeFerret (works outside Claude Code too).
 # Install: cp examples/git-pre-commit-hook .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
-# Set CODE_FERRET_ROOT to the plugin directory, e.g.
-#   ~/.claude/plugins/code-ferret  (or wherever this repo is cloned)
+# Configure the plugin directory once in the target repository:
+#   git config codeferret.root /absolute/path/to/code-ferret
+# CODE_FERRET_ROOT can be used as an environment override.
 set -uo pipefail
 
-CODE_FERRET_ROOT="${CODE_FERRET_ROOT:-$HOME/projects/code-ferret}"
+CODE_FERRET_ROOT="${CODE_FERRET_ROOT:-$(git config --get codeferret.root 2>/dev/null || true)}"
+SCANNER="$CODE_FERRET_ROOT/scripts/scan-secrets.sh"
 
-bash "$CODE_FERRET_ROOT/scripts/scan-secrets.sh" staged
-if [[ $? -eq 1 ]]; then
+if [[ -z "$CODE_FERRET_ROOT" || ! -f "$SCANNER" ]]; then
+  echo "CodeFerret: commit blocked because the secret scanner is not configured." >&2
+  echo "Run: git config codeferret.root /absolute/path/to/code-ferret" >&2
+  exit 1
+fi
+
+bash "$SCANNER" staged
+SCAN_STATUS=$?
+if [[ "$SCAN_STATUS" -eq 1 ]]; then
   echo ""
   echo "CodeFerret: commit blocked — potential credentials in staged changes." >&2
   echo "Bypass (not recommended): git commit --no-verify" >&2
+  exit 1
+fi
+if [[ "$SCAN_STATUS" -ne 0 ]]; then
+  echo "CodeFerret: commit blocked because the secret scan failed (exit $SCAN_STATUS)." >&2
   exit 1
 fi
 

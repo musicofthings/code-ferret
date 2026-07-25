@@ -1,0 +1,25 @@
+Run a full CodeFerret semantic review. Target: $ARGUMENTS (default "head" =
+working tree vs HEAD; "staged" = index only; anything else is a base ref like
+"main").
+
+CodeFerret hunts deep architectural flaws, never style. Workflow:
+
+1. Call the ferret_methodology tool (code-ferret MCP server) and internalize
+   the five detection vectors, confidence calibration, and output schema.
+2. Call ferret_collect_context with the target. If the diff is empty, say so
+   and stop. If it is very large (>15 files), review in directory-grouped
+   batches so no hunk is skipped.
+3. Call ferret_run_analyzers with the same target; treat analyzer findings as
+   evidence and deduplicate equivalent semantic findings.
+4. Read each changed file's relevant scope (enclosing functions/classes, call
+   sites of changed signatures) and analyze every hunk against all five
+   vectors: LOGIC, SECURITY, CONCURRENCY, PERFORMANCE, API. Only report issues
+   caused or exposed by the diff, each with a concrete failure scenario.
+5. Filter noise: drop findings a configured linter already enforces; call
+   ferret_fp_cache action "check" per finding and drop suppressed ones; assign
+   severity (CRITICAL/WARNING/SUGGESTION) and confidence (HIGH/MEDIUM/LOW).
+6. Write the findings JSON to .ferret/last-review.json per the output schema,
+   then print the report ordered CRITICAL → WARNING → SUGGESTION with
+   file:line:col locations and ready-to-apply diffs when a safe fix exists.
+   Close with the tally including suppressed and deduped counts.
+7. Scrub any credential values from output as [REDACTED_SECRET].

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "code-ferret",
+  "display_name": "CodeFerret",
+  "version": "0.2.0",
+  "description": "Diff-scoped semantic code review: bug hunting across logic, security, concurrency, performance, and API-contract vectors.",
+  "long_description": "CodeFerret reviews git diffs — never whole repositories — across five detection vectors (LOGIC, SECURITY, CONCURRENCY, PERFORMANCE, API) with confidence scoring, linter deduplication, a false-positive suppression cache, and a secret scanner. The host model performs the semantic analysis, so it works with any frontier model. Use the bundled 'review', 'precommit', and 'triage' prompts to drive it.",
+  "author": {
+    "name": "Shibi Kannan",
+    "email": "shibi.kannan@gmail.com"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "CODEFERRET_ROOT": "${__dirname}/vendor"
+      }
+    }
+  },
+  "tools": [
+    { "name": "ferret_collect_context", "description": "Scoped diff, changed files, history, config, and guidelines for a diff target" },
+    { "name": "ferret_run_analyzers", "description": "Run installed linters/type-checkers/security analyzers with bounded time" },
+    { "name": "ferret_scan_secrets", "description": "Scan added diff lines for credentials" },
+    { "name": "ferret_fp_cache", "description": "Check, add, or list false-positive suppressions" },
+    { "name": "ferret_methodology", "description": "Full CodeFerret review methodology and output schema" }
+  ],
+  "prompts": [
+    { "name": "review", "description": "Full semantic review of the diff", "text": "Run a full CodeFerret semantic review of the current diff." },
+    { "name": "precommit", "description": "Fast staged-only blocker check", "text": "Run the CodeFerret pre-commit check on staged changes." },
+    { "name": "triage", "description": "Step through saved findings interactively", "text": "Triage the findings in .ferret/last-review.json." }
+  ],
+  "keywords": ["code-review", "security", "sast", "bug-hunting", "pre-commit", "git"],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": { "node": ">=18" }
+  }
+}

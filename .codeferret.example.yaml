@@ -1,0 +1,44 @@
+version: 1
+
+reviews:
+  # chill | balanced | assertive
+  profile: balanced
+
+  # critical | warning | suggestion
+  minimum_severity: suggestion
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  ignore:
+    - "dist/**"
+    - "coverage/**"
+    - "**/*.generated.*"
+
+  path_instructions:
+    - path: "src/auth/**"
+      instructions: "Treat authentication bypasses, token leakage, and session fixation as critical."
+    - path: "migrations/**"
+      instructions: "Check backward compatibility, rollback safety, locking, and large-table runtime."
+
+guidelines:
+  discover: true
+  files:
+    - AGENTS.md
+    - CLAUDE.md
+    - .cursorrules
+
+reports:
+  summary: true
+  walkthrough: true
+  risk_assessment: true
+  linked_issues: true
+
+tools:
+  linters: true
+  typecheck: true
+  security: true
+  dependencies: true
+  ci_context: true
+  timeout_seconds: 120

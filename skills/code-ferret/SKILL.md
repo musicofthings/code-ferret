@@ -23,6 +23,14 @@ specific inputs or state that produce a wrong result, crash, leak, or exploit.
    It honors `.gitignore` automatically (git does) and additionally excludes
    patterns from a repo-root `.ferretignore` file (same syntax as .gitignore).
 
+   The collector also emits `FERRET_CONFIG` and
+   `FERRET_REPOSITORY_GUIDELINES`. Read
+   `references/configuration.md`, honor `.codeferret.yaml` review profile,
+   minimum severity, ignored paths, and matching path instructions, and treat
+   discovered `AGENTS.md`, `CLAUDE.md`, and `.cursorrules` content as repository
+   review policy. If `guidelines.files` names additional files, read those files
+   before analysis when they exist.
+
 2. For each changed hunk, read enough of the file to see the enclosing function
    or class and its call sites. If a change alters a function signature or public
    export, grep for its importers — downstream breakage is in scope.
@@ -34,6 +42,13 @@ specific inputs or state that produce a wrong result, crash, leak, or exploit.
 4. Use `git log -L` / `git blame` on suspicious hunks when history matters:
    a line that was recently fixed and is now being reverted is a regression
    signal — flag it at High confidence.
+
+5. Run installed analyzers with
+   `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run_tools.py [target]` and read
+   `.ferret/tool-results.json`. The runner executes only known installed tools,
+   never installs dependencies, bounds each process by configuration, and
+   scrubs common credential formats from captured output. Use results as
+   supporting evidence and deduplicate issues already reported by those tools.
 
 ## Phase 2 — Detection vectors
 

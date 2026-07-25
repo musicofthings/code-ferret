@@ -9,7 +9,13 @@ MODE="${1:-staged}"
 case "$MODE" in
   staged) DIFF_ARGS=(--cached) ;;
   head)   DIFF_ARGS=(HEAD) ;;
-  *)      DIFF_ARGS=("$MODE"...HEAD) ;;
+  *)
+    if ! git rev-parse --verify "${MODE}^{commit}" >/dev/null 2>&1; then
+      echo "error: unknown base ref: $MODE" >&2
+      exit 2
+    fi
+    DIFF_ARGS=("$MODE"...HEAD)
+    ;;
 esac
 
 git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "error: not a git repository" >&2; exit 2; }
@@ -29,6 +35,10 @@ REGEX="$(IFS='|'; echo "${PATTERNS[*]}")"
 FOUND=0
 CURRENT_FILE=""
 LINE_NO=0
+DIFF_OUTPUT="$(git diff "${DIFF_ARGS[@]}" --no-color -U0)" || {
+  echo "error: failed to read git diff" >&2
+  exit 2
+}
 while IFS= read -r line; do
   case "$line" in
     +++\ b/*)
@@ -46,7 +56,7 @@ while IFS= read -r line; do
     *)
       LINE_NO=$((LINE_NO + 1)) ;;
   esac
-done < <(git diff "${DIFF_ARGS[@]}" --no-color -U0)
+done <<< "$DIFF_OUTPUT"
 
 if [[ "$FOUND" -eq 1 ]]; then
   echo "result: SECRETS_DETECTED"

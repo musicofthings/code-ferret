@@ -1,11 +1,15 @@
 # CodeFerret PR review via GitHub Actions (alternative to the webhook Worker).
 # Copy to .github/workflows/code-ferret.yml in the target repository and set
 # the ANTHROPIC_API_KEY repository secret.
+#
+# This example uses claude-code-action. To review with GPT/Codex, Gemini, or
+# Grok instead, deploy the multi-provider webhook Worker (worker/) with the
+# matching API key — see "Model compatibility" in the README.
 name: CodeFerret Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read

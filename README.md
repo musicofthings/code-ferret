@@ -1,6 +1,9 @@
 # CodeFerret 🦡
 
-Autonomous code review and bug-hunting plugin for [Claude Code](https://claude.com/claude-code).
+Autonomous code review and bug-hunting plugin, model-agnostic across the
+frontier AI stack: [Claude Code](https://claude.com/claude-code) and Claude
+Desktop, OpenAI Codex, Gemini CLI, and any other MCP client — with a webhook
+Worker that can run reviews on Claude, GPT/Codex, Gemini, or Grok APIs.
 Diff-scoped semantic review across five detection vectors — logic, security,
 concurrency, performance, and API contracts — with confidence scoring,
 linter deduplication, a false-positive suppression cache, interactive triage,
@@ -8,15 +11,78 @@ and a pre-commit secret guard.
 
 ## Install
 
+### Claude Code (plugin)
+
 ```bash
 # From a local clone
 /plugin marketplace add ~/projects/code-ferret
 /plugin install code-ferret@code-ferret-marketplace
 
-# Or once pushed to GitHub
-/plugin marketplace add <owner>/code-ferret
+# Or from GitHub
+/plugin marketplace add musicofthings/code-ferret
 /plugin install code-ferret
 ```
+
+### Claude Desktop (MCP Bundle)
+
+```bash
+bash mcp-server/build-mcpb.sh   # produces dist/code-ferret.mcpb
+```
+
+Double-click the bundle (or drag it into Claude Desktop) to install. See
+`packaging/claude-desktop/README.md`.
+
+### OpenAI Codex
+
+Register the MCP server in `~/.codex/config.toml` and copy the
+`/ferret-review`, `/ferret-precommit`, `/ferret-triage` custom prompts. See
+`packaging/codex/README.md`.
+
+### Gemini CLI (extension)
+
+```bash
+gemini extensions install https://github.com/musicofthings/code-ferret
+cd ~/.gemini/extensions/code-ferret/mcp-server && npm install
+```
+
+The repo root is a Gemini CLI extension (`gemini-extension.json`): it wires up
+the MCP server, `GEMINI.md` context, and `/ferret:review`, `/ferret:precommit`,
+`/ferret:triage` commands.
+
+### Any other MCP client (Cursor, Grok desktop, ...)
+
+Run `npm install` in `mcp-server/`, then point the client at
+`node mcp-server/server/index.js` (stdio). The host's model does the semantic
+analysis, so CodeFerret works with whichever frontier model the client runs.
+
+## Model compatibility
+
+The host application's model performs the review in plugin/MCP mode, so local
+use is automatically model-agnostic. The Cloudflare Worker (webhook reviews)
+calls a provider API directly and supports:
+
+| Provider | API | Default model | Key |
+|---|---|---|---|
+| Anthropic (Claude) | Messages | `claude-sonnet-5` | `ANTHROPIC_API_KEY` |
+| OpenAI (GPT / Codex) | Responses | `gpt-5.6-terra` | `OPENAI_API_KEY` |
+| Google (Gemini) | generateContent | `gemini-3.6-flash` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| xAI (Grok) | Chat Completions | `grok-4.5` | `XAI_API_KEY` |
+
+`models.json` at the repo root is the single source of truth for providers,
+model IDs, endpoints, and API-docs URLs. The Worker picks the first provider
+with a configured key (override with the `CODEFERRET_PROVIDER` /
+`CODEFERRET_MODEL` vars in `worker/wrangler.toml`).
+
+### Automatic weekly model & API-docs updates
+
+`.github/workflows/model-check.yml` runs `scripts/check_models.py` every
+Monday: it queries each provider's live model-listing API, records
+additions/removals, promotes a fallback if a default model is retired, and
+hashes provider API docs to flag breaking-change reviews. Any registry change
+is opened as a pull request — merging it is the plugin's auto-update path.
+Configure the optional `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, and `XAI_API_KEY` repository secrets to enable listing for
+each provider (docs are checked without keys).
 
 ## Commands
 
@@ -43,6 +109,41 @@ Detection vectors:
 
 Style and lint issues are explicitly out of scope — findings matching an
 existing linter rule are deduplicated away.
+
+Before semantic analysis, full local reviews run known analyzers that are
+already installed: ESLint, Ruff, ShellCheck, TypeScript, Semgrep with a checked-in
+configuration, the CodeFerret secret scanner, npm audit, and pip-audit. Tools are
+never installed automatically or invoked through arbitrary package scripts.
+Normalized, secret-scrubbed results are saved to `.ferret/tool-results.json`.
+Local analyzers run in the current environment and may load repository-owned
+configuration or plugins, so run them only in a checkout you trust. The
+Cloudflare Worker never executes repository code; it only reads completed
+GitHub Check output and annotations.
+
+## Configuration
+
+Copy `.codeferret.example.yaml` to `.codeferret.yaml` to configure review
+behavior. Supported controls include:
+
+- `reviews.profile`: `chill`, `balanced`, or `assertive`
+- `reviews.minimum_severity`: `critical`, `warning`, or `suggestion`
+- `reviews.auto_review`: enable webhook reviews and opt drafts in or out
+- `reviews.ignore`: repository-relative glob patterns
+- `reviews.path_instructions`: focused review policy for matching paths
+- `guidelines`: automatic discovery of `AGENTS.md`, `CLAUDE.md`,
+  `.cursorrules`, or additional repository policy files
+- `reports`: PR summary, walkthrough, risk assessment, and linked-issue
+  validation controls
+- `tools`: installed linter, type-checker, security, dependency, and CI-context
+  controls with bounded execution time
+
+An unmet linked requirement makes the CodeFerret Check Run fail; partial or
+unknown coverage produces a neutral conclusion for human review.
+
+The Worker loads configuration and guidelines from the PR's trusted base commit,
+so a pull request cannot weaken its own review policy. Configuration changes
+take effect after they merge. Local `/code-ferret:review` runs use the working
+tree configuration and root-level guideline context from `collect-context.sh`.
 
 ## Noise control
 
@@ -71,7 +172,11 @@ For commits made outside Claude Code, install the native git hook:
 ```bash
 cp examples/git-pre-commit-hook .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
+git config codeferret.root "$(pwd)"
 ```
+
+If the target repository is not the CodeFerret checkout, set
+`codeferret.root` to CodeFerret's absolute installation path instead.
 
 ## GitHub PR automation (optional)
 
@@ -83,41 +188,72 @@ Two options:
 2. **Cloudflare Worker webhook proxy** (`worker/`) — a zero-retention
    middleware that verifies the GitHub webhook signature, scrubs secrets from
    payloads before they reach the LLM, fetches the PR diff, runs the review,
-   posts inline comments, and reports a Check Run
-   (success / neutral / failure). Deploy:
+   posts inline comments, updates a marked CodeFerret summary in the PR
+   description, maintains a structured walkthrough comment, validates linked
+   issue requirements, and reports a Check Run (success / neutral / failure).
+   Deploy:
 
    ```bash
    cd worker
    npm install
-   npx wrangler secret put ANTHROPIC_API_KEY
+   npx wrangler secret put ANTHROPIC_API_KEY   # or OPENAI_API_KEY / GEMINI_API_KEY / XAI_API_KEY
    npx wrangler secret put GITHUB_TOKEN
    npx wrangler secret put GITHUB_WEBHOOK_SECRET
    npx wrangler deploy
    ```
 
-   Then point a repo webhook (event: `pull_request`, content type
-   `application/json`, same secret) at the Worker URL. Optionally bind KV/D1
-   (see `wrangler.toml`) to sync false-positive suppressions across machines,
-   partitioned per repository.
+   The Worker reviews with whichever provider key you configure (see **Model
+   compatibility** above); pin a specific provider/model with the
+   `CODEFERRET_PROVIDER` and `CODEFERRET_MODEL` vars in `wrangler.toml`.
+
+   Then point a repo webhook (events: `pull_request` and `check_run`, content
+   type `application/json`, same secret) at the Worker URL. Failed external
+   checks trigger one idempotent CI-context review; CodeFerret's own Check Run
+   is ignored to prevent loops. Optionally bind KV/D1
+   (see `wrangler.toml`). KV tracks the last reviewed PR commit and active
+   finding fingerprints plus the walkthrough comment ID so synchronize events
+   become incremental and update existing report artifacts instead of posting
+   duplicates. D1 provides repository-partitioned suppression lookups.
 
 ## Privacy guardrails
 
 - Code payloads are regex-scrubbed for credentials (`[REDACTED_SECRET]`)
   before any LLM submission — locally and in the Worker.
 - The Worker is pass-through only: no code, diffs, or paths are written to
-  KV, D1, or logs. Only 16-char structural hashes of dismissed findings are
-  stored, partitioned per repo.
+  KV, D1, or logs. KV stores reviewed commit SHAs, 16-character active finding
+  fingerprints, the numeric walkthrough-comment ID, and names of currently
+  failing CI checks; D1 stores 16-character suppression hashes, partitioned per
+  repository.
+
+## Tests
+
+```bash
+# Shell collectors, secret scanner, commit guards, analyzer runner,
+# and the model-registry checker
+bash tests/run.sh
+
+# Cloudflare Worker unit tests (incl. multi-provider layer) and type checking
+cd worker
+npm install
+npm test
+npm run typecheck
+```
 
 ## Layout
 
 ```
 code-ferret/
-├── .claude-plugin/plugin.json      # plugin manifest (+ marketplace.json)
-├── commands/                       # /code-ferret:review, :triage, :precommit
+├── .claude-plugin/plugin.json      # Claude Code plugin manifest (+ marketplace.json)
+├── gemini-extension.json           # Gemini CLI extension manifest (+ GEMINI.md)
+├── models.json                     # model/provider registry (single source of truth)
+├── commands/                       # /code-ferret:* (Claude Code .md) + ferret/*.toml (Gemini CLI)
 ├── skills/code-ferret/             # review methodology + vector checklists + schema
 ├── agents/ferret-reviewer.md       # per-vector subagent for parallel review of big diffs
 ├── hooks/hooks.json                # PreToolUse git-commit secret guard
-├── scripts/                        # collect-context.sh, scan-secrets.sh, fp_cache.py, precommit-guard.sh
-├── worker/                         # Cloudflare Worker webhook proxy (optional)
+├── scripts/                        # collectors, analyzers, fp cache, check_models.py
+├── mcp-server/                     # MCP server + MCPB bundle build (Claude Desktop et al.)
+├── packaging/                      # Codex prompts/config, Claude Desktop install guide
+├── worker/                         # Cloudflare Worker webhook proxy (multi-provider)
+├── .github/workflows/              # weekly model-registry & API-docs checker
 └── examples/                       # GitHub Action workflow, native git hook
 ```
