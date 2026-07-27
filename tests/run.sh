@@ -34,6 +34,34 @@ assert_contains "$CONTEXT" "profile: assertive"
 assert_contains "$CONTEXT" "=== FERRET_REPOSITORY_GUIDELINES ==="
 assert_contains "$CONTEXT" "Check database migrations for rollback safety."
 
+# --- new scope modes -------------------------------------------------------
+printf 'tracked edit\n' >> "$REPO/app.txt"
+
+UNCOMMITTED="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$UNCOMMITTED" "mode: uncommitted"
+assert_contains "$UNCOMMITTED" "+++ b/app.txt"
+[[ "$UNCOMMITTED" != *"+++ b/fresh.ts"* ]] || fail "uncommitted must exclude untracked files"
+
+UNCOMMITTED_UT="$(cd "$REPO" && FERRET_INCLUDE_UNTRACKED=1 bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$UNCOMMITTED_UT" "+++ b/fresh.ts"
+
+BASE_BRANCH="$(git -C "$REPO" rev-parse --abbrev-ref HEAD)"
+git -C "$REPO" checkout -q -b feature
+printf 'committed change\n' > "$REPO/committed.txt"
+git -C "$REPO" add committed.txt
+git -C "$REPO" commit -qm "committed change"
+
+ALL="$(cd "$REPO" && FERRET_BASE_REF="$BASE_BRANCH" bash "$ROOT/scripts/collect-context.sh" all)"
+assert_contains "$ALL" "mode: all"
+assert_contains "$ALL" "+++ b/committed.txt"
+assert_contains "$ALL" "+++ b/app.txt"
+
+LIGHT="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+LIGHT_ON="$(cd "$REPO" && FERRET_LIGHT=1 bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$LIGHT" "=== FERRET_FILE_HISTORY ==="
+assert_contains "$LIGHT_ON" "(skipped: light mode)"
+[[ "${#LIGHT_ON}" -lt "${#LIGHT}" ]] || fail "light mode should emit less context"
+
 set +e
 INVALID_CONTEXT="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" missing-ref 2>&1)"
 INVALID_CONTEXT_STATUS=$?
