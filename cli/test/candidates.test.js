@@ -60,3 +60,32 @@ test("empty scopes are not offered as candidates", () => {
   assert.ok(candidates.every((c) => !c.command.includes("--committed")));
   assert.ok(candidates.every((c) => !c.command.includes("--uncommitted")));
 });
+
+test("fits boundary: exactly maxFiles is treated as fitting", () => {
+  const maxFiles = 50;
+  const committedFilesAtBoundary = Array.from({ length: maxFiles }, (_, i) => `f${i}.ts`);
+  const committedFilesAboveBoundary = Array.from({ length: maxFiles + 1 }, (_, i) => `f${i}.ts`);
+  const files = Array.from({ length: 100 }, (_, i) => `src/f${i}.ts`);
+
+  // Test at boundary: should fit
+  const resultAtBoundary = computeCandidates({
+    files,
+    maxFiles,
+    committedFiles: committedFilesAtBoundary,
+  });
+  const committedCandidate = resultAtBoundary.candidates.find((c) => c.command === "ferret review --committed");
+  assert.ok(committedCandidate, "committed candidate should be present");
+  assert.equal(committedCandidate.files, maxFiles);
+  assert.equal(committedCandidate.fits, true, "exactly maxFiles should fit");
+
+  // Test above boundary: should not fit
+  const resultAboveBoundary = computeCandidates({
+    files,
+    maxFiles,
+    committedFiles: committedFilesAboveBoundary,
+  });
+  const committedCandidateAbove = resultAboveBoundary.candidates.find((c) => c.command === "ferret review --committed");
+  assert.ok(committedCandidateAbove, "committed candidate should be present");
+  assert.equal(committedCandidateAbove.files, maxFiles + 1);
+  assert.equal(committedCandidateAbove.fits, false, "maxFiles + 1 should not fit");
+});
