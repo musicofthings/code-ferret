@@ -33,6 +33,8 @@ test("toWireFinding maps CodeFerret fields onto the wire contract", () => {
   assert.equal(wire.type, "finding");
   assert.equal(wire.severity, "critical");
   assert.equal(wire.fileName, "src/pay.ts");
+  assert.equal(wire.line, 84);
+  assert.equal(wire.character, 14);
   assert.equal(wire.codegenInstructions, "Wrap the read-modify-write in a transaction.");
   assert.deepEqual(wire.suggestions, ["--- a/src/pay.ts\n+++ b/src/pay.ts\n"]);
   assert.equal(wire.comment, "Race condition during balance debit.");
@@ -85,4 +87,52 @@ test("emitNoChanges emits the documented empty-diff sequence", () => {
   assert.equal(events[2].status, "review_skipped");
   assert.equal(events[2].findings, 0);
   assert.equal(events[2].message, "No changes detected");
+});
+
+test("severity is case-insensitive", () => {
+  assert.equal(mapSeverity("critical"), "critical");
+  assert.equal(mapSeverity("Warning"), "major");
+});
+
+test("emitter.finding() emits wire-formatted finding as single JSON line", () => {
+  const cap = capture();
+  const e = createEmitter({ agent: true, stdout: cap.stdout });
+  e.finding({
+    file: "src/util.ts",
+    line: 42,
+    severity: "WARNING",
+    message: "Multi-line\nmessage content",
+    patch: "--- a/src/util.ts\n+++ b/src/util.ts\n@@ -42,3 +42,5 @@\n content with\n multiple lines\n here",
+  });
+  const rawOutput = cap.stdout.write.toString();
+  // Verify exactly one line was written (ends with \n, contains no \n in the middle)
+  const lines = cap.events();
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].type, "finding");
+  assert.equal(lines[0].fileName, "src/util.ts");
+  assert.equal(lines[0].comment, "Multi-line\nmessage content");
+  assert.deepEqual(lines[0].suggestions[0], "--- a/src/util.ts\n+++ b/src/util.ts\n@@ -42,3 +42,5 @@\n content with\n multiple lines\n here");
+});
+
+test("emitter.error() emits error type and fields", () => {
+  const cap = capture();
+  const e = createEmitter({ agent: true, stdout: cap.stdout });
+  e.error({ message: "Parse error on line 12", candidates: ["foo", "bar"] });
+  const events = cap.events();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "error");
+  assert.equal(events[0].message, "Parse error on line 12");
+  assert.deepEqual(events[0].candidates, ["foo", "bar"]);
+});
+
+test("toWireFinding preserves zero for line and character", () => {
+  const wire = toWireFinding({
+    file: "a.ts",
+    line: 0,
+    character: 0,
+    severity: "WARNING",
+    message: "m",
+  });
+  assert.equal(wire.line, 0);
+  assert.equal(wire.character, 0);
 });
