@@ -19,16 +19,6 @@ export const AGENTS = [
   { name: "gemini", cmd: "gemini", args: (prompt) => ["-p", prompt] },
 ];
 
-/**
- * cmd.exe (used when shell:true on Windows) builds its command line by naively
- * space-joining file + args with no escaping. A path or argument containing a
- * space or quote must be wrapped in double quotes or the line splits wrong.
- */
-function quoteForWindowsShell(value) {
-  if (!/[\s"]/.test(value)) return value;
-  return `"${value.replace(/"/g, '\\"')}"`;
-}
-
 function defaultIsInstalled(cmd) {
   const probe = spawnSync(cmd, ["--version"], { stdio: "ignore", shell: WIN });
   return !probe.error;
@@ -61,13 +51,19 @@ export function runAgent({
   return new Promise((resolve) => {
     let child;
     try {
-      const rawArgs = agent.args(prompt);
-      const cmd = WIN ? quoteForWindowsShell(agent.cmd) : agent.cmd;
-      const args = WIN ? rawArgs.map(quoteForWindowsShell) : rawArgs;
-      child = spawn(cmd, args, {
+      // No shell, ever: shelling out (even Windows cmd.exe via shell:true) means
+      // the prompt's text is re-lexed as command-line syntax before the agent
+      // ever sees it. Quoting for that is not just intricate but, for a literal
+      // newline, impossible — cmd.exe truncates a `cmd /c "..."` command line at
+      // the first embedded newline no matter how it's escaped (verified: caret-
+      // escaping the newline does not survive; the second line is silently
+      // dropped). Spawning the binary directly sidesteps re-lexing entirely and
+      // relies on Node's own well-tested Windows argv marshaling, which we
+      // verified round-trips embedded quotes, %VAR%, shell metacharacters, and
+      // literal newlines byte-for-byte into the child's argv.
+      child = spawn(agent.cmd, agent.args(prompt), {
         cwd,
         env,
-        shell: WIN,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {

@@ -9,6 +9,7 @@ import { detectAgent, runAgent, AGENTS, CLAUDE_ALLOWED_TOOLS } from "../src/agen
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE = join(HERE, "fixtures", "fake-agent.js");
+const ECHO = join(HERE, "fixtures", "echo-args.js");
 
 function makeRepo() {
   const dir = mkdtempSync(join(tmpdir(), "ferret-agent-"));
@@ -80,3 +81,29 @@ test("runAgent resolves with exitCode 1 when the binary is missing", async () =>
   });
   assert.equal(result.exitCode, 1);
 });
+
+// Fix round 1: runAgent must never let a shell re-lex the prompt. It must
+// round-trip arbitrary prompt content into the child's argv byte-for-byte,
+// including quotes, %-expansion, shell metacharacters, and embedded newlines.
+// No test here spawns a live agent — echo-args.js only reports back argv.
+const ROUND_TRIP_PROMPTS = [
+  ["embedded double quotes", 'check <file> <vector> "<message>"'],
+  ["percent-expansion", "pct-%PATH%-end"],
+  ["shell metacharacters, no spaces", "a&b|c^d<e>f(g)h!i"],
+  ["embedded newline", "line one\nline two"],
+];
+
+for (const [label, prompt] of ROUND_TRIP_PROMPTS) {
+  test(`runAgent delivers a prompt with ${label} to argv untouched`, async () => {
+    const lines = [];
+    const result = await runAgent({
+      agent: { name: "custom", cmd: process.execPath, args: (p) => [ECHO, p] },
+      prompt,
+      cwd: makeRepo(),
+      onLine: (l) => lines.push(l),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(lines.length, 1);
+    assert.deepEqual(JSON.parse(lines[0]), [prompt]);
+  });
+}
