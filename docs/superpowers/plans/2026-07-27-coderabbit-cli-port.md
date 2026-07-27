@@ -19,6 +19,16 @@
 - **Never echo credential values.** Secret locations only, per existing project rule.
 - Branch: `feat/coderabbit-cli-port`. Commit after every task.
 
+## Environment notes (Windows / Git Bash, discovered during execution)
+
+- `node --test test/` (directory form) fails on this setup with a spurious
+  `MODULE_NOT_FOUND`. Use `node --test "test/*.test.js"` everywhere.
+- `bash tests/run.sh` cannot reach its final success line here: its last step,
+  `python3 tests/test_run_tools.py`, fails with `WinError 193`. This is
+  **pre-existing** (reproduced at commit `d654a0a`, before any Task 3 change)
+  and out of scope for this plan. Judge `tests/run.sh` by whether the bash
+  assertions pass, not by the final line.
+
 ---
 
 ### Task 1: CLI package scaffold and path resolution
@@ -106,7 +116,7 @@ Expected: FAIL — `Cannot find module '../src/paths.js'`
     "code-ferret": "bin/ferret.js"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.js\""
   },
   "engines": {
     "node": ">=20"
@@ -2460,7 +2470,7 @@ export async function main(argv, io = {}) {
 
 - [ ] **Step 5: Run the full CLI suite to verify it passes**
 
-Run: `cd cli && node --test test/`
+Run: `cd cli && node --test "test/*.test.js"`
 Expected: PASS, all suites green
 
 - [ ] **Step 6: Commit**
@@ -2583,7 +2593,7 @@ Add to `.codeferret.example.yaml` under the `reviews:` block:
 
 - [ ] **Step 6: Verify the docs are internally consistent**
 
-Run: `bash tests/run.sh && cd cli && node --test test/`
+Run: `bash tests/run.sh && cd cli && node --test "test/*.test.js"`
 Expected: PASS both suites (docs changes must not break the shell or CLI tests)
 
 - [ ] **Step 7: Commit**
