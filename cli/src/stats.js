@@ -17,7 +17,18 @@ async function ensureDir(ferretDir) {
 
 export async function appendHistory(ferretDir, entry) {
   await ensureDir(ferretDir);
-  await appendFile(join(ferretDir, "history.jsonl"), `${JSON.stringify(entry)}\n`);
+  const historyPath = join(ferretDir, "history.jsonl");
+  const historyFile = historyPath;
+  // Ensure the file ends with a newline (handles half-written lines from interrupted writes)
+  let content = "";
+  try {
+    content = await readFile(historyFile, "utf8");
+  } catch {
+    // File doesn't exist yet, that's fine
+  }
+  // If there's content and it doesn't end with newline, prepend one to what we're about to append
+  const prefix = content && !content.endsWith("\n") ? "\n" : "";
+  await appendFile(historyFile, `${prefix}${JSON.stringify(entry)}\n`);
 }
 
 export async function readHistory(ferretDir) {
@@ -40,6 +51,8 @@ export async function readHistory(ferretDir) {
 }
 
 export function aggregate(entries) {
+  // Note: assumes entries are in chronological/append order (as from readHistory).
+  // Using entries[0]?.ts and entries.at(-1)?.ts for first/last review.
   const stats = {
     reviews: entries.length,
     findings_total: 0,

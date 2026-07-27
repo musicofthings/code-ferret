@@ -31,6 +31,9 @@ test("appendHistory creates .ferret, the gitignore, and one line per review", as
   assert.equal(raw.length, 2);
   assert.equal(JSON.parse(raw[0]).branch, "main");
   assert.ok(existsSync(join(dir, ".gitignore")));
+  // Verify .gitignore content matches FERRET_GITIGNORE
+  const gitignoreContent = readFileSync(join(dir, ".gitignore"), "utf8");
+  assert.equal(gitignoreContent, FERRET_GITIGNORE);
 });
 
 test("the generated gitignore keeps review-cache.json shareable", () => {
@@ -46,19 +49,40 @@ test("readHistory skips malformed lines", async () => {
   assert.equal((await readHistory(dir)).length, 1);
 });
 
+test("appendHistory recovers from half-written lines (no trailing newline)", async () => {
+  const dir = newDir();
+  mkdirSync(dir, { recursive: true });
+  // Simulate an interrupted write by creating a file with no trailing newline
+  const firstEntry = { ...ENTRY, ts: "2026-07-27T10:00:00Z" };
+  writeFileSync(join(dir, "history.jsonl"), JSON.stringify(firstEntry)); // no \n
+  // Now append a new entry
+  const secondEntry = { ...ENTRY, ts: "2026-07-27T11:00:00Z" };
+  await appendHistory(dir, secondEntry);
+  // Both entries should be readable, not silently lost
+  const entries = await readHistory(dir);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].ts, "2026-07-27T10:00:00Z");
+  assert.equal(entries[1].ts, "2026-07-27T11:00:00Z");
+});
+
 test("readHistory returns an empty array when there is no history", async () => {
   assert.deepEqual(await readHistory(newDir()), []);
 });
 
 test("aggregate totals reviews, severities, vectors, and duration", () => {
-  const stats = aggregate([ENTRY, { ...ENTRY, ts: "2026-07-27T12:00:00Z", duration_ms: 8000 }]);
-  assert.equal(stats.reviews, 2);
-  assert.equal(stats.findings_total, 6);
-  assert.equal(stats.by_severity.CRITICAL, 2);
-  assert.equal(stats.by_vector.LOGIC, 4);
-  assert.equal(stats.suppressed_total, 2);
-  assert.equal(stats.deduped_total, 4);
-  assert.equal(stats.avg_duration_ms, 6000);
+  // Use 3 entries with distinct durations: 2000, 4000, 12000 (mean=6000, median=4000)
+  const stats = aggregate([
+    { ...ENTRY, duration_ms: 2000 },
+    { ...ENTRY, ts: "2026-07-27T11:00:00Z", duration_ms: 4000 },
+    { ...ENTRY, ts: "2026-07-27T12:00:00Z", duration_ms: 12000 },
+  ]);
+  assert.equal(stats.reviews, 3);
+  assert.equal(stats.findings_total, 9); // 3 entries × 3 findings each
+  assert.equal(stats.by_severity.CRITICAL, 3);
+  assert.equal(stats.by_vector.LOGIC, 6);
+  assert.equal(stats.suppressed_total, 3);
+  assert.equal(stats.deduped_total, 6);
+  assert.equal(stats.avg_duration_ms, 6000); // mean of 2000, 4000, 12000
   assert.equal(stats.first_review, "2026-07-27T10:00:00Z");
   assert.equal(stats.last_review, "2026-07-27T12:00:00Z");
 });
