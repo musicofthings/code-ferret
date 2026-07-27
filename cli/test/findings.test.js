@@ -39,11 +39,14 @@ test("readPrompts parses last-prompts.json", async () => {
 });
 
 test("sortFindings orders by severity then confidence", () => {
-  const sorted = sortFindings([
+  const input = [
     { id: "a", severity: "SUGGESTION", confidence: "HIGH" },
     { id: "b", severity: "CRITICAL", confidence: "MEDIUM" },
     { id: "c", severity: "CRITICAL", confidence: "HIGH" },
     { id: "d", severity: "WARNING", confidence: "LOW" },
-  ]);
+  ];
+  const before = input.map((f) => f.id);
+  const sorted = sortFindings(input);
   assert.deepEqual(sorted.map((f) => f.id), ["c", "b", "d", "a"]);
+  assert.deepEqual(input.map((f) => f.id), before, "input array must not be mutated");
 });

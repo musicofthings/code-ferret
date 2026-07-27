@@ -58,4 +58,6 @@ test("formatCandidates lists commands with counts and fit indicators", () => {
   assert.match(out, /12 files/);
   assert.match(out, /over limit/);
   assert.match(out, /Choose one and rerun manually\./);
+  assert.match(out, /12 files \(fits\)/);
+  assert.match(out, /61 files \(over limit\)/);
 });
