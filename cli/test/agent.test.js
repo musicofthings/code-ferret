@@ -5,11 +5,19 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { detectAgent, runAgent, AGENTS, CLAUDE_ALLOWED_TOOLS } from "../src/agent.js";
+import {
+  detectAgent,
+  runAgent,
+  AGENTS,
+  CLAUDE_ALLOWED_TOOLS,
+  defaultIsInstalled,
+} from "../src/agent.js";
 
+const WIN = process.platform === "win32";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE = join(HERE, "fixtures", "fake-agent.js");
 const ECHO = join(HERE, "fixtures", "echo-args.js");
+const SHIM = join(HERE, "fixtures", "fake-shim.cmd");
 
 function makeRepo() {
   const dir = mkdtempSync(join(tmpdir(), "ferret-agent-"));
@@ -107,3 +115,36 @@ for (const [label, prompt] of ROUND_TRIP_PROMPTS) {
     assert.deepEqual(JSON.parse(lines[0]), [prompt]);
   });
 }
+
+// Fix round 2: detection and invocation must agree, or `ferret doctor` can
+// report an agent as installed that `ferret review` then fails to launch.
+// fake-shim.cmd is a real (inert) Windows batch file fixture -- not a live
+// agent -- used only to reproduce the "can spawnSync/spawn even reach this
+// binary" question that a real npm-installed codex/gemini .cmd shim raises.
+test(
+  "defaultIsInstalled reports false for a target runAgent cannot actually spawn",
+  { skip: !WIN && "fake-shim.cmd only exercises the Windows .cmd-shim path" },
+  () => {
+    assert.equal(defaultIsInstalled(SHIM), false);
+  },
+);
+
+test("defaultIsInstalled reports true for a target that really is spawnable", () => {
+  assert.equal(defaultIsInstalled(process.execPath), true);
+});
+
+test(
+  "runAgent turns a .cmd/.bat shim's spawn failure into an actionable message, not a bare errno",
+  { skip: !WIN && "fake-shim.cmd only exercises the Windows .cmd-shim path" },
+  async () => {
+    const result = await runAgent({
+      agent: { name: "custom", cmd: SHIM, args: () => [] },
+      prompt: "review",
+      cwd: makeRepo(),
+    });
+    assert.equal(result.exitCode, 1);
+    assert.doesNotMatch(result.stderr, /^spawn.*EINVAL$/);
+    assert.match(result.stderr, /\.cmd/i);
+    assert.match(result.stderr, /FERRET_AGENT_CMD/);
+  },
+);
