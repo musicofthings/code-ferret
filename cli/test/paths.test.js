@@ -42,3 +42,11 @@ test("repoRoot returns null outside a repo", () => {
   assert.equal(repoRoot(dir), null);
   assert.equal(ferretDir(dir), null);
 });
+
+test("repoRoot from nested subdirectory returns the same toplevel", () => {
+  const dir = makeRepo();
+  const sub = join(dir, "src", "nested");
+  mkdirSync(sub, { recursive: true });
+  assert.equal(repoRoot(sub), repoRoot(dir));
+  assert.equal(ferretDir(sub), join(repoRoot(dir), ".ferret"));
+});
