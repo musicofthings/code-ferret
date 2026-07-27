@@ -44,7 +44,10 @@ export const AGENTS = [
  * every real `ferret review` immediately fails to invoke.
  */
 export function defaultIsInstalled(cmd) {
-  const probe = spawnSync(cmd, ["--version"], { stdio: "ignore", shell: false });
+  // timeout: a wedged `claude --version` (or any hung probe) would otherwise
+  // block `ferret doctor` forever with no escape. spawnSync sets `.error` on
+  // a timeout, so the existing `!probe.error` check already handles it.
+  const probe = spawnSync(cmd, ["--version"], { stdio: "ignore", shell: false, timeout: 5000 });
   return !probe.error;
 }
 
@@ -67,10 +70,28 @@ function describeSpawnFailure(err, agent) {
   return err.message;
 }
 
-/** Pick the host agent: explicit override first, then first installed. */
+/**
+ * Pick the host agent: explicit override first, then first installed.
+ *
+ * The override is run through the same isInstalled probe as the built-ins —
+ * it does not get to exempt itself from the "an agent runAgent cannot spawn
+ * must not be reported as installed" guarantee. If the override fails the
+ * probe, this throws (rather than silently falling through to auto-detection
+ * or returning null) because the user configured it explicitly: they deserve
+ * to be told that specific command cannot be spawned, not a generic "no
+ * agent found" that looks identical to never having configured one at all.
+ */
 export function detectAgent({ env = process.env, isInstalled = defaultIsInstalled } = {}) {
   const override = env.FERRET_AGENT_CMD || env.FERRET_AGENT;
   if (override) {
+    if (!isInstalled(override)) {
+      throw new Error(
+        `FERRET_AGENT_CMD/FERRET_AGENT is set to "${override}", but it can't be ` +
+          "spawned (it may be a Windows .cmd/.bat shim, not on PATH, or not " +
+          "executable). Point it at a directly executable binary, or unset it " +
+          "to fall back to auto-detecting claude/codex/gemini.",
+      );
+    }
     return { name: "custom", cmd: override, args: (prompt) => [prompt] };
   }
   for (const agent of AGENTS) {
@@ -78,6 +99,8 @@ export function detectAgent({ env = process.env, isInstalled = defaultIsInstalle
   }
   return null;
 }
+
+const KILL_GRACE_MS = 5000;
 
 /**
  * Run the host agent. Its stdout is opaque progress text delivered line by line
@@ -105,28 +128,65 @@ export function runAgent({
       return;
     }
 
+    // Decode at the stream level so Node's internal StringDecoder holds a
+    // partial multibyte sequence across a chunk boundary. Manually calling
+    // .toString() on a raw Buffer that ends mid-sequence emits U+FFFD
+    // replacement characters instead -- agent progress output is full of
+    // box-drawing and spinner glyphs, so this is not a hypothetical.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    let settled = false;
     let buffer = "";
     let stderr = "";
+    let timedOut = false;
+    let killTimer = null;
+
     child.stdout.on("data", (chunk) => {
-      buffer += chunk.toString();
+      buffer += chunk;
       let index;
       while ((index = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, index).replace(/\r$/, "");
         buffer = buffer.slice(index + 1);
-        if (line) onLine?.(line);
+        if (line && !settled) onLine?.(line);
       }
     });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
 
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
-    child.on("close", (code) => {
+    // A timeout is otherwise indistinguishable from any other failure (both
+    // would resolve {exitCode:1, stderr:""}). SIGTERM alone is not enough to
+    // guarantee this promise ever settles: on Windows it maps to
+    // TerminateProcess and always works, but on POSIX a child that traps or
+    // ignores SIGTERM never emits 'close', and the promise would hang
+    // forever -- breaking the "runAgent always resolves" guarantee. The
+    // grace timer's SIGKILL cannot be caught or ignored by the child.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+    }, timeoutMs);
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (buffer.trim()) onLine?.(buffer.trim());
-      resolve({ exitCode: code ?? 1, stderr });
+      clearTimeout(killTimer);
+      resolve(result);
+    }
+
+    child.on("close", (code) => {
+      if (!settled && buffer.trim()) onLine?.(buffer.trim());
+      const note = timedOut
+        ? `Agent timed out after ${timeoutMs}ms and was sent SIGTERM.`
+        : null;
+      finish({
+        exitCode: code ?? 1,
+        stderr: note ? (stderr ? `${stderr}\n${note}` : note) : stderr,
+        timedOut,
+      });
     });
     child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ exitCode: 1, stderr: describeSpawnFailure(err, agent) });
+      finish({ exitCode: 1, stderr: describeSpawnFailure(err, agent), timedOut });
     });
   });
 }

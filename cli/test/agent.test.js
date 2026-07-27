@@ -18,6 +18,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE = join(HERE, "fixtures", "fake-agent.js");
 const ECHO = join(HERE, "fixtures", "echo-args.js");
 const SHIM = join(HERE, "fixtures", "fake-shim.cmd");
+const CHUNKY = join(HERE, "fixtures", "chunky-agent.js");
+const SLEEPY = join(HERE, "fixtures", "sleepy-agent.js");
 
 function makeRepo() {
   const dir = mkdtempSync(join(tmpdir(), "ferret-agent-"));
@@ -46,6 +48,21 @@ test("FERRET_AGENT_CMD overrides detection", () => {
   assert.equal(agent.name, "custom");
   assert.equal(agent.cmd, "my-agent");
   assert.deepEqual(agent.args("hello"), ["hello"]);
+});
+
+// Fix round 3, finding 4: the override must not exempt itself from the
+// "an agent runAgent cannot spawn must not be reported as installed"
+// guarantee, and the failure must be actionable, not a generic
+// "no agent found".
+test("FERRET_AGENT_CMD is rejected with an actionable error when it cannot be spawned", () => {
+  assert.throws(
+    () => detectAgent({ env: { FERRET_AGENT_CMD: "my-agent" }, isInstalled: () => false }),
+    (err) => {
+      assert.match(err.message, /my-agent/);
+      assert.match(err.message, /FERRET_AGENT_CMD/);
+      return true;
+    },
+  );
 });
 
 test("the claude allowlist is scoped to CodeFerret's own tooling", () => {
@@ -148,3 +165,49 @@ test(
     assert.match(result.stderr, /FERRET_AGENT_CMD/);
   },
 );
+
+// Fix round 3, findings 1 & 5: chunk-boundary correctness has no coverage
+// otherwise. chunky-agent.js writes, with real delays between writes so each
+// lands as its own 'data' event: a line split mid-line across two chunks, a
+// \r\n line ending, a multibyte UTF-8 character ("日") split mid-sequence
+// across a chunk boundary, and a final line with no trailing newline. Before
+// the setEncoding("utf8") fix, the multibyte case corrupted into U+FFFD.
+test("runAgent handles split lines, CRLF, a multibyte split, and an unterminated final line", async () => {
+  const lines = [];
+  const result = await runAgent({
+    agent: { name: "custom", cmd: process.execPath, args: () => [CHUNKY] },
+    prompt: "review",
+    cwd: makeRepo(),
+    onLine: (l) => lines.push(l),
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(lines, [
+    "first line",
+    "second line",
+    "third 日本語 line",
+    "unterminated last line",
+  ]);
+});
+
+// Fix round 3, findings 2 & 5: a timeout must be distinguishable from any
+// other failure (both previously resolved {exitCode:1, stderr:""}), and the
+// promise must still settle even against a child that ignores SIGTERM (what
+// sleepy-agent.js models -- on POSIX this is the scenario the SIGKILL grace
+// timer exists for; on Windows SIGTERM already maps to TerminateProcess, so
+// this proves the fast path without needing the grace timer to fire).
+test("runAgent distinguishes a timeout from other failures and still resolves", async () => {
+  const start = Date.now();
+  const result = await runAgent({
+    agent: { name: "custom", cmd: process.execPath, args: () => [SLEEPY] },
+    prompt: "review",
+    cwd: makeRepo(),
+    timeoutMs: 300,
+  });
+  const elapsed = Date.now() - start;
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.timedOut, true);
+  assert.match(result.stderr, /timed out/i);
+  assert.match(result.stderr, /300/);
+  // Resolved well before the 5s SIGKILL grace period would have to fire.
+  assert.ok(elapsed < 4000, `expected to resolve quickly, took ${elapsed}ms`);
+});
