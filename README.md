@@ -116,7 +116,36 @@ ferret                  # review committed + staged + unstaged changes
 
 Scope flags: `--committed`, `--uncommitted`, `--include-untracked`,
 `--base <branch>`, `--base-commit <sha>`, `--dir <path>`, `-c/--config <file>`.
-Contradictory combinations are rejected before a review starts.
+Contradictory combinations are rejected before a review starts, as is a base
+ref that does not resolve — a review that cannot run always exits non-zero,
+never "no changes found".
+
+### Agent output (`--agent`)
+
+One JSON object per line on stdout, and nothing else — anything a human would
+read goes to stderr.
+
+| `type` | When |
+|---|---|
+| `review_context` | Once, first: target, branch, base ref, file count, agent, light |
+| `status` | Phase change: `collecting_context`, `reviewing`, or `review_skipped` |
+| `heartbeat` | Every 15s while the agent is running |
+| `finding` | One per finding; severity on the wire is `critical`/`major`/`minor` |
+| `prompts` | `--show-prompts` only: the saved prompts from the last review |
+| `complete` | Once, last, on success — including the empty-diff case |
+| `error` | Once, last, on any failure |
+
+Every failure path emits an `error` event, including ones that occur before a
+review starts (bad flags, unresolvable base ref, no agent, a blocked lock), so
+a consumer never has to distinguish "failed" from "produced nothing".
+
+### Concurrent reviews
+
+Reviews are serialized per repository through a `.ferret/review.lock`. A second
+`ferret review` against the same repo fails immediately, naming the process
+that holds the lock, rather than queueing or letting two agents overwrite each
+other's results. A lock left behind by a killed process is reclaimed
+automatically — either its process is gone, or it has aged out.
 
 Every `ferret review` spawns a real agent session against your existing
 subscription. Use `--light` for the cheap path, and keep the git pre-commit

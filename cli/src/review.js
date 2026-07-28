@@ -10,6 +10,7 @@ import { readReview, sortFindings, tallySeverities } from "./findings.js";
 import { formatReport, formatCandidates } from "./report.js";
 import { computeCandidates } from "./candidates.js";
 import { appendHistory } from "./stats.js";
+import { acquireReviewLock, LockBusyError } from "./lock.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MAX_FILES = 50;
@@ -307,9 +308,6 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     );
   }
 
-  emitter.reviewContext(context);
-  emitter.status("collecting_context");
-
   const agentEnv = {
     ...env,
     // "" rather than null: collect-context.sh reads this as
@@ -333,27 +331,48 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     configFiles: flags.config ?? [],
   });
 
+  // Everything from here on mutates shared per-repo state (last-review.json,
+  // last-prompts.json, history.jsonl, stats.json), so it is serialized against
+  // other invocations on this repository. Two overlapping runs -- two
+  // terminals, or concurrent MCP tool calls -- otherwise delete each other's
+  // last-review.json, whichever agent finishes last silently wins both that
+  // file and history.jsonl, and a concurrent `ferret review findings` can
+  // observe the window where neither exists.
+  //
+  // Acquired here rather than at the top of runReview on purpose: every check
+  // above is read-only and fails fast, and making a misconfigured repo or an
+  // oversized diff wait on an unrelated in-flight review would be pure cost.
+  //
+  // It is also acquired BEFORE the first emitter call, so a blocked run emits
+  // one error event and nothing else. Announcing review_context and
+  // status:"collecting_context" first would claim work that never started.
+  let lock;
+  try {
+    lock = await acquireReviewLock(dir, { target: scope.target });
+  } catch (err) {
+    if (err instanceof LockBusyError) return fail(err.message);
+    throw err;
+  }
+
+  emitter.reviewContext(context);
+  emitter.status("collecting_context");
+
+  const started = Date.now();
+  // Declared outside the try so the finally can always clear it: an exception
+  // between here and the clearInterval below would otherwise leave a repeating
+  // timer holding the event loop open after runReview returned.
+  let beat = null;
+  try {
   // A stale last-review.json from a previous run must not survive into this
   // one: without this, an agent that fails outright (non-zero exit, wrote
   // nothing) or times out leaves the old file in place, `readReview` happily
   // returns it, `!review` is false, and both failure branches below become
   // unreachable -- the CLI reports the previous run's findings as fresh,
   // appends them to permanent history, and exits 0.
-  //
-  // KNOWN LIMITATION (not fixed -- no lock file, deliberately): two `ferret
-  // review` invocations against the same repo's .ferret directory (two
-  // terminals, or overlapping MCP tool calls) are not serialized. Whichever
-  // agent finishes last wins last-review.json/history.jsonl, and this rm can
-  // delete a just-completed review out from under a concurrent `ferret
-  // review findings` / `ferret_findings` read. `ferret` has never claimed to
-  // support concurrent invocations against one repo; fixing this for real
-  // needs a lock file (e.g. an O_EXCL-created .ferret/review.lock), which is
-  // a real feature, not a one-line patch -- out of scope here.
   await rm(join(dir, "last-review.json"), { force: true });
   await rm(join(dir, "last-prompts.json"), { force: true });
 
-  const started = Date.now();
-  const beat = setInterval(() => emitter.heartbeat(), HEARTBEAT_MS);
+  beat = setInterval(() => emitter.heartbeat(), HEARTBEAT_MS);
   emitter.status("reviewing");
   if (!flags.agent) stdout.write(`Reviewing ${files.length} file(s) with ${agent.name}…\n`);
 
@@ -367,6 +386,7 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     },
   });
   clearInterval(beat);
+  beat = null;
 
   const review = await readReview(dir);
   if (result.exitCode !== 0 && !review) {
@@ -434,4 +454,8 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
   await rm(join(dir, "stats.json"), { force: true });
 
   return 0;
+  } finally {
+    if (beat) clearInterval(beat);
+    await lock.release();
+  }
 }

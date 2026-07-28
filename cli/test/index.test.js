@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main, parseFlags } from "../src/index.js";
@@ -10,6 +10,9 @@ import { main, parseFlags } from "../src/index.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = join(HERE, "fixtures", "fake-agent.js");
 const SEVERITY_FIXTURE = join(HERE, "fixtures", "severity-agent.js");
+// Takes a configurable delay and then succeeds -- long enough to hold the
+// review lock open while a second invocation races it.
+const SLOW_FIXTURE = join(HERE, "fixtures", "slow-agent.js");
 const ECHO = join(HERE, "fixtures", "echo-args.js");
 
 // agent.js (Task 7) deliberately never uses a shell to invoke the host agent
@@ -644,4 +647,90 @@ test("the analyzer step passes a real base ref through unchanged", async () => {
   assert.equal(code, 1);
   const [prompt] = JSON.parse(lastLine(stdout.text()));
   assert.match(prompt, /run_tools\.py main/);
+});
+
+// --- concurrent review invocations ---------------------------------------
+
+test("a second concurrent review is refused instead of clobbering the first", async () => {
+  // Two real reviews racing on one repo. The slow fixture holds the lock for a
+  // deterministic window; without the lock both would delete each other's
+  // last-review.json and whichever agent finished last would silently win both
+  // that file and history.jsonl.
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const env = workingAgentEnv({ FAKE_AGENT_DELAY_MS: "1500" }, SLOW_FIXTURE);
+
+  const runs = await Promise.all([
+    main(["review", "--uncommitted"], { stdout: capture(), stderr: capture(), env, cwd }),
+    main(["review", "--uncommitted"], { stdout: capture(), stderr: capture(), env, cwd }),
+  ]);
+
+  assert.deepEqual(runs.toSorted(), [0, 1], "exactly one review may run");
+  // Exactly one history line: the refused run must not record a review it
+  // never performed.
+  const history = readFileSync(join(cwd, ".ferret", "history.jsonl"), "utf8")
+    .split("\n").filter((l) => l.trim());
+  assert.equal(history.length, 1);
+});
+
+test("the refusal explains which process holds the lock", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  // A lock this process genuinely holds: live pid, this host, stamped now.
+  mkdirSync(join(cwd, ".ferret"), { recursive: true });
+  writeFileSync(
+    join(cwd, ".ferret", "review.lock"),
+    JSON.stringify({ pid: process.pid, host: hostname(), started_at: new Date().toISOString() }),
+  );
+  const stderr = capture();
+  const code = await main(["review", "--uncommitted"], {
+    stdout: capture(), stderr, env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 1);
+  assert.match(stderr.text(), /already running/);
+  assert.match(stderr.text(), new RegExp(`pid ${process.pid}`));
+  // The refused run must not have touched the previous review's outputs.
+  assert.equal(existsSync(join(cwd, ".ferret", "history.jsonl")), false);
+});
+
+test("a blocked review reaches --agent as an error event", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  mkdirSync(join(cwd, ".ferret"), { recursive: true });
+  writeFileSync(
+    join(cwd, ".ferret", "review.lock"),
+    JSON.stringify({ pid: process.pid, host: hostname(), started_at: new Date().toISOString() }),
+  );
+  const stdout = capture();
+  const code = await main(["review", "--uncommitted", "--agent"], {
+    stdout, stderr: capture(), env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 1);
+  const event = JSON.parse(stdout.text().trim());
+  assert.equal(event.type, "error");
+  assert.match(event.message, /already running/);
+});
+
+test("the lock is released after a successful review", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const code = await main(["review", "--uncommitted"], {
+    stdout: capture(), stderr: capture(), env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 0);
+  assert.equal(existsSync(join(cwd, ".ferret", "review.lock")), false);
+});
+
+test("the lock is released even when the agent fails", async () => {
+  // The failure path runs through the same finally; a lock leaked here would
+  // wedge every later review on this repo until the stale window expired.
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const code = await main(["review", "--uncommitted"], {
+    stdout: capture(), stderr: capture(),
+    env: workingAgentEnv({ FAKE_AGENT_FAIL: "1" }),
+    cwd,
+  });
+  assert.equal(code, 1);
+  assert.equal(existsSync(join(cwd, ".ferret", "review.lock")), false);
 });
