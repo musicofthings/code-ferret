@@ -15,7 +15,27 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_MAX_FILES = 50;
 const HEARTBEAT_MS = 15_000;
 
-/** Best-effort default base branch: origin/HEAD, else main, else master. */
+/** True when `ref` resolves to a commit in this repository. */
+async function refExists(cwd, ref) {
+  try {
+    await execFileAsync("git", ["rev-parse", "--verify", `${ref}^{commit}`], { cwd });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort default base branch: origin/HEAD, else main, else master.
+ *
+ * Returns null -- never a speculative fallback -- when none of those resolve.
+ * A previous version ended with a bare `return "main"`, so a repository whose
+ * default branch is neither main nor master (and has no origin/HEAD) silently
+ * reviewed against a ref that does not exist: every git call below failed,
+ * which used to be indistinguishable from an empty diff, and a plain `ferret
+ * review` reported "No changes detected" and exited 0 on a repo full of real
+ * changes. Callers must treat null as "ask the user for --base".
+ */
 async function defaultBase(cwd) {
   try {
     const { stdout } = await execFileAsync(
@@ -23,24 +43,36 @@ async function defaultBase(cwd) {
       ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
       { cwd },
     );
+    // The local branch of the same name is what gets diffed, and it is not
+    // guaranteed to exist just because the remote HEAD points at it (a fetch
+    // without a checkout leaves only the remote-tracking ref). Verify before
+    // returning it, and fall through to main/master when it is missing.
     const ref = stdout.trim().replace(/^origin\//, "");
-    if (ref) return ref;
+    if (ref && (await refExists(cwd, ref))) return ref;
   } catch { /* no origin/HEAD; fall through */ }
   for (const ref of ["main", "master"]) {
-    try {
-      await execFileAsync("git", ["rev-parse", "--verify", `${ref}^{commit}`], { cwd });
-      return ref;
-    } catch { /* try next */ }
+    if (await refExists(cwd, ref)) return ref;
   }
-  return "main";
+  return null;
 }
 
+/**
+ * Changed-file list from git, or null when git itself failed.
+ *
+ * The null/[] distinction is load-bearing. An empty array means "the diff is
+ * genuinely empty", which makes runReview print "No changes detected" and exit
+ * 0. This function used to return [] on failure too, so an unresolvable base
+ * ref or an unborn HEAD produced the exact same clean-pass result as a clean
+ * tree -- `ferret review --base typo` exited 0 and, under --agent, emitted a
+ * review_skipped/complete pair. Every caller must turn null into a hard error;
+ * an empty diff is the only thing allowed to exit 0.
+ */
 async function gitFiles(cwd, args) {
   try {
     const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 });
     return stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -55,29 +87,34 @@ async function scopedGitFiles(cwd, args, pathspec) {
   return gitFiles(cwd, pathspec ? [...args, "--", pathspec] : args);
 }
 
+/** Concatenate two gitFiles results, propagating a null from either side. */
+function concatFiles(a, b) {
+  return a === null || b === null ? null : [...a, ...b];
+}
+
 /**
  * Files in scope, used for the empty-diff check and candidate computation.
  * `pathspec`, when set, narrows every git call to that subtree (see the
  * `--dir` handling in runReview) -- without it, `--dir` only changed which
  * directory git ran from, not what it reported, since repoRoot() always
  * resolves back to the toplevel.
+ *
+ * Returns null when any underlying git call failed (see gitFiles): the caller
+ * must not treat that as an empty diff.
  */
 async function scopeFiles(cwd, scope, pathspec) {
+  const untracked = () =>
+    scopedGitFiles(cwd, ["ls-files", "--others", "--exclude-standard"], pathspec);
+
   if (scope.target === "uncommitted") {
     const tracked = await scopedGitFiles(cwd, ["diff", "HEAD", "--name-only"], pathspec);
-    if (!scope.includeUntracked) return tracked;
-    return [
-      ...tracked,
-      ...(await scopedGitFiles(cwd, ["ls-files", "--others", "--exclude-standard"], pathspec)),
-    ];
+    if (tracked === null || !scope.includeUntracked) return tracked;
+    return concatFiles(tracked, await untracked());
   }
   if (scope.target === "all") {
     const changed = await scopedGitFiles(cwd, ["diff", scope.baseRef, "--name-only"], pathspec);
-    if (!scope.includeUntracked) return changed;
-    return [
-      ...changed,
-      ...(await scopedGitFiles(cwd, ["ls-files", "--others", "--exclude-standard"], pathspec)),
-    ];
+    if (changed === null || !scope.includeUntracked) return changed;
+    return concatFiles(changed, await untracked());
   }
   return scopedGitFiles(cwd, ["diff", `${scope.target}...HEAD`, "--name-only"], pathspec);
 }
@@ -149,6 +186,39 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
   const scope = resolveScope(flags, { defaultBase: defaultBaseRef });
   const emitter = createEmitter({ agent: flags.agent, stdout });
 
+  /** Report a review failure on the right channel for the mode, and exit 1. */
+  const fail = (message, extra = {}) => {
+    if (flags.agent) emitter.error({ message, ...extra });
+    else stderr.write(`error: ${message}\n`);
+    return 1;
+  };
+
+  // Every scope except "uncommitted" diffs against a base ref, so an
+  // unresolvable one has to be rejected here, loudly, before anything else
+  // runs. Without this the failure surfaced only as git errors swallowed
+  // downstream, which read as an empty diff: a typo'd --base, or an
+  // auto-detected default in a repo with no main/master, exited 0 and
+  // reported a clean review. A green exit must mean "reviewed, nothing
+  // found" -- never "could not review".
+  if (scope.target !== "uncommitted") {
+    const explicit = flags.baseCommit ?? flags.base ?? null;
+    if (!scope.baseRef) {
+      return fail(
+        "could not determine a base branch to compare against: this repository has no "
+          + "origin/HEAD, main, or master. Pass --base <branch> or --base-commit <commit>.",
+      );
+    }
+    if (!(await refExists(root, scope.baseRef))) {
+      return fail(
+        explicit
+          ? `base ref "${scope.baseRef}" does not resolve to a commit in this repository. `
+            + "Check the spelling, or fetch the branch first."
+          : `auto-detected base ref "${scope.baseRef}" does not resolve to a commit in this `
+            + "repository. Pass --base <branch> or --base-commit <commit> explicitly.",
+      );
+    }
+  }
+
   let branch = "unknown";
   try {
     const { stdout: out } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root });
@@ -157,6 +227,15 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
 
   const pathspec = scopePathspec(root, cwd);
   const files = await scopeFiles(root, scope, pathspec);
+  // null means git failed, which is NOT an empty diff (see gitFiles). The base
+  // ref was already verified above, so the realistic cause left is an unborn
+  // HEAD -- `git diff HEAD` cannot run before the first commit.
+  if (files === null) {
+    return fail(
+      `git could not list changed files for scope "${scope.target}". `
+        + "If this repository has no commits yet, make an initial commit first.",
+    );
+  }
 
   // detectAgent throws when FERRET_AGENT_CMD/FERRET_AGENT is set but cannot be
   // spawned (see agent.js) -- that is a deliberate, actionable error for a
@@ -197,15 +276,22 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     // candidate counts must reflect the active --dir scope too, or the
     // suggested "narrower" commands (computed against the whole repo) can
     // still be over the limit even after the user already scoped down.
+    // These counts only refine the suggestions, so a null (git failed) degrades
+    // to "no candidate of that kind" rather than failing the whole command --
+    // the oversized-diff error itself is already correct and actionable.
+    const candidateBase = scope.baseRef ?? defaultBaseRef;
     const { candidates, candidatesNote } = computeCandidates({
       files,
       maxFiles,
-      committedFiles: await scopedGitFiles(
-        root,
-        ["diff", `${scope.baseRef ?? defaultBaseRef}...HEAD`, "--name-only"],
-        pathspec,
-      ),
-      uncommittedFiles: await scopedGitFiles(root, ["diff", "HEAD", "--name-only"], pathspec),
+      committedFiles: candidateBase
+        ? (await scopedGitFiles(
+            root,
+            ["diff", `${candidateBase}...HEAD`, "--name-only"],
+            pathspec,
+          )) ?? []
+        : [],
+      uncommittedFiles:
+        (await scopedGitFiles(root, ["diff", "HEAD", "--name-only"], pathspec)) ?? [],
     });
     const message = `Review scope too large: ${files.length} files (limit ${maxFiles})`;
     if (flags.agent) emitter.error({ message, candidates, candidatesNote });
@@ -214,12 +300,11 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
   }
 
   if (!agent) {
-    const message = agentError
-      ? agentError.message
-      : "No host coding agent found. Install claude, codex, or gemini, or set FERRET_AGENT_CMD. Run `ferret doctor` for details.";
-    if (flags.agent) emitter.error({ message });
-    else stderr.write(`error: ${message}\n`);
-    return 1;
+    return fail(
+      agentError
+        ? agentError.message
+        : "No host coding agent found. Install claude, codex, or gemini, or set FERRET_AGENT_CMD. Run `ferret doctor` for details.",
+    );
   }
 
   emitter.reviewContext(context);
@@ -227,7 +312,11 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
 
   const agentEnv = {
     ...env,
-    FERRET_BASE_REF: scope.baseRef ?? defaultBaseRef,
+    // "" rather than null: collect-context.sh reads this as
+    // `${FERRET_BASE_REF:-main}`, which treats empty and unset alike, whereas a
+    // null would reach the child as the literal string "null". Only reachable
+    // as "" for the "uncommitted" target, which never consults a base ref.
+    FERRET_BASE_REF: scope.baseRef ?? defaultBaseRef ?? "",
     FERRET_INCLUDE_UNTRACKED: scope.includeUntracked ? "1" : "0",
     FERRET_LIGHT: flags.light ? "1" : "0",
     // --dir's own file-count accounting (scopeFiles/scopedGitFiles above) has
@@ -281,16 +370,12 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
 
   const review = await readReview(dir);
   if (result.exitCode !== 0 && !review) {
-    const message = `Host agent ${agent.name} failed (exit ${result.exitCode}). ${result.stderr.trim()}`;
-    if (flags.agent) emitter.error({ message });
-    else stderr.write(`error: ${message}\n`);
-    return 1;
+    return fail(
+      `Host agent ${agent.name} failed (exit ${result.exitCode}). ${result.stderr.trim()}`,
+    );
   }
   if (!review) {
-    const message = "The host agent did not write .ferret/last-review.json.";
-    if (flags.agent) emitter.error({ message });
-    else stderr.write(`error: ${message}\n`);
-    return 1;
+    return fail("The host agent did not write .ferret/last-review.json.");
   }
 
   const findings = sortFindings(review.findings ?? []);
@@ -330,7 +415,10 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     ts: new Date().toISOString(),
     target: scope.target,
     branch,
-    commit: (await gitFiles(root, ["rev-parse", "--short", "HEAD"]))[0] ?? null,
+    // gitFiles returns null when git fails (unborn HEAD), so this must be
+    // optional-chained -- indexing [0] on null would throw right at the end of
+    // an otherwise successful review.
+    commit: (await gitFiles(root, ["rev-parse", "--short", "HEAD"]))?.[0] ?? null,
     by_severity: bySeverity,
     by_vector: byVector,
     suppressed: tally.suppressed,

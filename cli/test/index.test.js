@@ -45,9 +45,9 @@ function workingAgentEnv(extra = {}, fixture = FIXTURE) {
   };
 }
 
-function makeRepo() {
+function makeRepo(branch = "main") {
   const dir = mkdtempSync(join(tmpdir(), "ferret-cli-"));
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  execFileSync("git", ["init", "-q", "-b", branch], { cwd: dir });
   execFileSync("git", ["config", "user.email", "t@t.local"], { cwd: dir });
   execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
   writeFileSync(join(dir, "app.txt"), "baseline\n");
@@ -312,6 +312,98 @@ test("an empty diff emits the review_skipped sequence and never spawns an agent"
   assert.deepEqual(events.map((e) => e.type), ["review_context", "status", "complete"]);
   assert.equal(events[2].message, "No changes detected");
   assert.equal(existsSync(join(cwd, ".ferret", "last-review.json")), false);
+});
+
+// --- base-ref resolution -----------------------------------------------
+//
+// Regression suite for the silent-clean-pass bug: git failures used to be
+// swallowed into an empty file list, which is indistinguishable from a clean
+// tree, so an unusable base ref exited 0 and reported "No changes detected".
+// A green exit must only ever mean "reviewed, found nothing". Each of these
+// uses a *working* fixture agent, so "the review never ran" is the only way
+// they can pass -- with the guaranteed-broken agent they would pass vacuously.
+
+test("a typo'd --base exits 1 instead of reporting a clean review", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  execFileSync("git", ["add", "."], { cwd });
+  execFileSync("git", ["commit", "-qm", "change"], { cwd });
+  const stderr = capture();
+  const stdout = capture();
+  const code = await main(["review", "--base", "totally-bogus-ref"], {
+    stdout, stderr, env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 1);
+  assert.match(stderr.text(), /does not resolve to a commit/);
+  assert.doesNotMatch(stdout.text(), /No changes detected/);
+  assert.equal(existsSync(join(cwd, ".ferret", "last-review.json")), false);
+});
+
+test("a typo'd --base-commit exits 1 under --committed too", async () => {
+  const cwd = makeRepo();
+  const stderr = capture();
+  const code = await main(["review", "--committed", "--base-commit", "deadbeef"], {
+    stdout: capture(), stderr, env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 1);
+  assert.match(stderr.text(), /does not resolve to a commit/);
+});
+
+test("a typo'd --base reaches --agent as an error event, not review_skipped", async () => {
+  const cwd = makeRepo();
+  const stdout = capture();
+  const code = await main(["review", "--base", "totally-bogus-ref", "--agent"], {
+    stdout, stderr: capture(), env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 1);
+  const events = stdout.text().trimEnd().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(events.map((e) => e.type), ["error"]);
+  assert.match(events[0].message, /does not resolve to a commit/);
+});
+
+test("a repo with no main/master fails loudly instead of reviewing against a phantom base", async () => {
+  // No --base at all: defaultBase() finds no origin/HEAD, main, or master, and
+  // must report that rather than falling back to a literal "main" that does
+  // not exist. This is the no-user-error path -- it fires on any repo whose
+  // default branch is named something else.
+  const cwd = makeRepo("trunk");
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  execFileSync("git", ["add", "."], { cwd });
+  execFileSync("git", ["commit", "-qm", "change"], { cwd });
+  const stderr = capture();
+  const code = await main(["review"], {
+    stdout: capture(), stderr, env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 1);
+  assert.match(stderr.text(), /could not determine a base branch/);
+  assert.match(stderr.text(), /--base/);
+});
+
+test("--uncommitted needs no base ref and still works without main/master", async () => {
+  const cwd = makeRepo("trunk");
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const stdout = capture();
+  const code = await main(["review", "--uncommitted", "--agent"], {
+    stdout, stderr: capture(), env: workingAgentEnv(), cwd,
+  });
+  assert.equal(code, 0);
+  const types = stdout.text().trimEnd().split("\n").map((l) => JSON.parse(l).type);
+  assert.ok(types.includes("complete"));
+  assert.equal(existsSync(join(cwd, ".ferret", "last-review.json")), true);
+});
+
+test("a valid base ref with a genuinely empty diff still exits 0", async () => {
+  // The counterweight to the tests above: hardening the git-failure path must
+  // not turn a real clean tree into an error.
+  const cwd = makeRepo();
+  const stdout = capture();
+  const code = await main(["review", "--base", "main", "--agent"], {
+    stdout, stderr: capture(), env: brokenAgentEnv, cwd,
+  });
+  assert.equal(code, 0);
+  const events = stdout.text().trimEnd().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(events.map((e) => e.type), ["review_context", "status", "complete"]);
+  assert.equal(events[2].message, "No changes detected");
 });
 
 test("review findings replays without spawning an agent", async () => {
