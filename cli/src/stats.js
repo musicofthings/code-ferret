@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile, stat, open } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -18,17 +18,29 @@ async function ensureDir(ferretDir) {
 export async function appendHistory(ferretDir, entry) {
   await ensureDir(ferretDir);
   const historyPath = join(ferretDir, "history.jsonl");
-  const historyFile = historyPath;
-  // Ensure the file ends with a newline (handles half-written lines from interrupted writes)
-  let content = "";
+
+  // Check if the file needs a leading newline (efficient: read only the last byte)
+  let needsNewline = false;
   try {
-    content = await readFile(historyFile, "utf8");
+    const stats = await stat(historyPath);
+    if (stats.size > 0) {
+      // Read only the last byte to check if it's a newline
+      let handle;
+      try {
+        handle = await open(historyPath, "r");
+        const buffer = Buffer.alloc(1);
+        await handle.read(buffer, 0, 1, stats.size - 1);
+        needsNewline = buffer[0] !== 0x0A; // 0x0A is '\n'
+      } finally {
+        if (handle) await handle.close();
+      }
+    }
   } catch {
-    // File doesn't exist yet, that's fine
+    // File doesn't exist or can't be read; proceed without prepended newline
   }
-  // If there's content and it doesn't end with newline, prepend one to what we're about to append
-  const prefix = content && !content.endsWith("\n") ? "\n" : "";
-  await appendFile(historyFile, `${prefix}${JSON.stringify(entry)}\n`);
+
+  const prefix = needsNewline ? "\n" : "";
+  await appendFile(historyPath, `${prefix}${JSON.stringify(entry)}\n`);
 }
 
 export async function readHistory(ferretDir) {

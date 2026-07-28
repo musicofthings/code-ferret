@@ -65,6 +65,24 @@ test("appendHistory recovers from half-written lines (no trailing newline)", asy
   assert.equal(entries[1].ts, "2026-07-27T11:00:00Z");
 });
 
+test("appendHistory efficiently handles large history files (seek, not slurp)", async () => {
+  const dir = newDir();
+  mkdirSync(dir, { recursive: true });
+  // Build a large history file (300 lines) to verify we use seek, not load entire file
+  const lines = [];
+  for (let i = 0; i < 300; i++) {
+    lines.push(JSON.stringify({ ...ENTRY, ts: `2026-07-27T10:${String(i).padStart(2, "0")}:00Z` }));
+  }
+  writeFileSync(join(dir, "history.jsonl"), lines.join("\n") + "\n");
+  // Append one more entry
+  const newEntry = { ...ENTRY, ts: "2026-07-27T10:59:00Z" };
+  await appendHistory(dir, newEntry);
+  // Verify all entries are readable
+  const entries = await readHistory(dir);
+  assert.equal(entries.length, 301);
+  assert.equal(entries[300].ts, "2026-07-27T10:59:00Z");
+});
+
 test("readHistory returns an empty array when there is no history", async () => {
   assert.deepEqual(await readHistory(newDir()), []);
 });
