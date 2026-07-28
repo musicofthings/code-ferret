@@ -14,7 +14,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -40,6 +40,11 @@ function ferretRoot() {
 const ROOT = ferretRoot();
 const SCRIPTS = join(ROOT, "scripts");
 const SKILL_DIR = join(ROOT, "skills", "code-ferret");
+
+/** Import a CLI module by path, Windows-safe. */
+function cliModule(name) {
+  return import(pathToFileURL(join(ROOT, "cli", "src", name)).href);
+}
 
 function run(command, args, cwd) {
   return new Promise((resolvePromise) => {
@@ -76,6 +81,17 @@ const targetArg = z
   .or(z.string())
   .optional()
   .describe("Diff target: 'staged' (index only), 'head' (working tree vs HEAD, default), or a base ref like 'main'");
+// collect-context.sh alone understands 'all' and 'uncommitted' (run_tools.py and
+// scan-secrets.sh do not), so only ferret_collect_context gets the wider enum.
+const collectTargetArg = z
+  .enum(["staged", "head", "all", "uncommitted"])
+  .or(z.string())
+  .optional()
+  .describe(
+    "Diff target: 'staged' (index only), 'head' (working tree vs HEAD, default), " +
+      "'all' (committed + staged + unstaged vs FERRET_BASE_REF), " +
+      "'uncommitted' (staged + unstaged tracked, no untracked), or a base ref like 'main'",
+  );
 
 const server = new McpServer({ name: "code-ferret", version: "0.2.0" });
 
@@ -85,7 +101,7 @@ server.registerTool(
     title: "Collect review context",
     description:
       "Emit the scoped diff (±50 lines of lexical context), changed-file list, per-file git history, touched dependency manifests, FERRET_CONFIG (.codeferret.yaml), and repository guidelines for the requested diff target. Run this first for any CodeFerret review.",
-    inputSchema: { repo_path: repoPathArg, target: targetArg },
+    inputSchema: { repo_path: repoPathArg, target: collectTargetArg },
   },
   async ({ repo_path, target }) => {
     const cwd = repo_path || process.cwd();
@@ -190,6 +206,65 @@ server.registerTool(
       }
     }
     return textResult(sections.join("\n\n"));
+  },
+);
+
+server.registerTool(
+  "ferret_doctor",
+  {
+    title: "Verify CodeFerret setup",
+    description:
+      "Check the local CodeFerret setup: node runtime, git repository state, .ferret storage, bash/python3, host coding agent, script resolution, and optional analyzers. Failures indicate the review cannot run; warnings are informational.",
+    inputSchema: { repo_path: repoPathArg },
+  },
+  async ({ repo_path }) => {
+    try {
+      const { runDoctor, formatDoctor } = await cliModule("doctor.js");
+      const result = await runDoctor({ cwd: repo_path || process.cwd() });
+      return textResult(formatDoctor(result), result.exitCode !== 0);
+    } catch (err) {
+      return textResult(`Could not load the CodeFerret CLI: ${err.message}`, true);
+    }
+  },
+);
+
+server.registerTool(
+  "ferret_stats",
+  {
+    title: "CodeFerret review statistics",
+    description:
+      "Aggregate .ferret/history.jsonl into review counts by severity and vector, suppression and dedup totals, and average duration. Set rebuild to recompute the cached stats from scratch.",
+    inputSchema: {
+      repo_path: repoPathArg,
+      rebuild: z.boolean().optional().describe("Rescan review history and rebuild the stats cache"),
+    },
+  },
+  async ({ repo_path, rebuild }) => {
+    const cwd = repo_path || process.cwd();
+    try {
+      const { readStats, formatStats } = await cliModule("stats.js");
+      return textResult(formatStats(await readStats(join(cwd, ".ferret"), { rebuild: Boolean(rebuild) })));
+    } catch (err) {
+      return textResult(`Could not load the CodeFerret CLI: ${err.message}`, true);
+    }
+  },
+);
+
+server.registerTool(
+  "ferret_findings",
+  {
+    title: "Replay stored findings",
+    description:
+      "Read the findings from the most recent review (.ferret/last-review.json) without re-running analysis. Use in multi-step loops where a later step consumes an earlier review's results.",
+    inputSchema: { repo_path: repoPathArg },
+  },
+  async ({ repo_path }) => {
+    const cwd = repo_path || process.cwd();
+    try {
+      return textResult(await readFile(join(cwd, ".ferret", "last-review.json"), "utf8"));
+    } catch {
+      return textResult("No stored review found. Run the review prompt first.", true);
+    }
   },
 );
 

@@ -41,8 +41,10 @@ Steps:
    the scratchpad; do NOT modify the working tree in this command).
 
 7. Write the findings JSON to `.ferret/last-review.json` (schema:
-   skill references/output-schema.md), then print the terminal report:
-   findings ordered CRITICAL → WARNING → SUGGESTION with clickable
+   skill references/output-schema.md), including `codegen_instructions` on
+   every finding. Also write `.ferret/last-prompts.json` and append one line to
+   `.ferret/history.jsonl` per that same reference. Then print the terminal
+   report: findings ordered CRITICAL → WARNING → SUGGESTION with clickable
    `file:line:col` locations, and the closing tally including suppressed and
    deduped counts.
 
