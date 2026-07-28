@@ -65,29 +65,41 @@ export async function readHistory(ferretDir) {
 export function aggregate(entries) {
   // Note: assumes entries are in chronological/append order (as from readHistory).
   // Using entries[0]?.ts and entries.at(-1)?.ts for first/last review.
+  //
+  // Both accumulators are null-prototype. review.js sanitizes what it writes,
+  // but history.jsonl is a plain append-only file that also holds lines from
+  // older versions and anything a user hand-edited, so this side cannot assume
+  // clean keys: against a normal `{}`, a bucket named "constructor" makes
+  // `(stats.by_vector[vec] ?? 0) + n` resolve through Object.prototype and
+  // string-concatenate a function into the count, and "__proto__" silently
+  // discards the assignment entirely.
   const stats = {
     reviews: entries.length,
     findings_total: 0,
-    by_severity: { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 },
-    by_vector: {},
+    by_severity: Object.assign(Object.create(null), { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 }),
+    by_vector: Object.create(null),
     suppressed_total: 0,
     deduped_total: 0,
     avg_duration_ms: 0,
     first_review: entries[0]?.ts ?? null,
     last_review: entries.at(-1)?.ts ?? null,
   };
+  // A count that is not a finite number (null, a string, NaN from a truncated
+  // line) must not poison a running total -- one bad line would otherwise turn
+  // every subsequent figure into NaN or a concatenated string.
+  const count = (n) => (typeof n === "number" && Number.isFinite(n) ? n : 0);
   let duration = 0;
   for (const entry of entries) {
     for (const [sev, n] of Object.entries(entry.by_severity ?? {})) {
-      stats.by_severity[sev] = (stats.by_severity[sev] ?? 0) + n;
-      stats.findings_total += n;
+      stats.by_severity[sev] = (stats.by_severity[sev] ?? 0) + count(n);
+      stats.findings_total += count(n);
     }
     for (const [vec, n] of Object.entries(entry.by_vector ?? {})) {
-      stats.by_vector[vec] = (stats.by_vector[vec] ?? 0) + n;
+      stats.by_vector[vec] = (stats.by_vector[vec] ?? 0) + count(n);
     }
-    stats.suppressed_total += entry.suppressed ?? 0;
-    stats.deduped_total += entry.deduped ?? 0;
-    duration += entry.duration_ms ?? 0;
+    stats.suppressed_total += count(entry.suppressed);
+    stats.deduped_total += count(entry.deduped);
+    duration += count(entry.duration_ms);
   }
   stats.avg_duration_ms = entries.length ? Math.round(duration / entries.length) : 0;
   return stats;
@@ -102,9 +114,16 @@ export async function readStats(ferretDir, { rebuild = false } = {}) {
       // fall through and rebuild
     }
   }
-  const stats = aggregate(await readHistory(ferretDir));
-  await ensureDir(ferretDir);
-  await writeFile(cache, `${JSON.stringify(stats, null, 2)}\n`);
+  const entries = await readHistory(ferretDir);
+  const stats = aggregate(entries);
+  // Only materialize .ferret when there is history worth caching. Otherwise a
+  // pure read creates the directory, a .gitignore, and a stats.json as a side
+  // effect -- and the MCP ferret_stats tool takes an arbitrary caller-supplied
+  // repo_path, so that littered whatever directory it was pointed at.
+  if (entries.length > 0) {
+    await ensureDir(ferretDir);
+    await writeFile(cache, `${JSON.stringify(stats, null, 2)}\n`);
+  }
   return stats;
 }
 

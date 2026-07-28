@@ -136,3 +136,11 @@ test("toWireFinding preserves zero for line and character", () => {
   assert.equal(wire.line, 0);
   assert.equal(wire.character, 0);
 });
+
+test("a wire alias maps back to the same tier the report tallies it as", () => {
+  // "MAJOR" is what events.js itself emits for WARNING, so an agent echoing it
+  // back must not be tallied as a warning while going out as "minor".
+  assert.equal(mapSeverity("MAJOR"), "major");
+  assert.equal(mapSeverity("minor"), "minor");
+  assert.equal(mapSeverity("INFO"), "minor");
+});

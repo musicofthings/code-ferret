@@ -89,3 +89,23 @@ test("fits boundary: exactly maxFiles is treated as fitting", () => {
   assert.equal(committedCandidateAbove.files, maxFiles + 1);
   assert.equal(committedCandidateAbove.fits, false, "maxFiles + 1 should not fit");
 });
+
+test("a directory containing spaces is quoted in the suggested command", () => {
+  // The suggestion is meant to be copy-pasted; unquoted, `--dir src/My
+  // Components` reviews "src/My" and passes "Components" as a stray positional.
+  const { candidates } = computeCandidates({
+    files: ["src/My Components/a.ts", "src/My Components/b.ts"],
+    maxFiles: 1,
+  });
+  const dirCandidate = candidates.find((c) => c.command.includes("--dir"));
+  assert.equal(dirCandidate.command, "ferret review --dir 'src/My Components'");
+});
+
+test("an ordinary directory is left unquoted", () => {
+  const { candidates } = computeCandidates({
+    files: ["src/pay/a.ts", "src/pay/b.ts"],
+    maxFiles: 1,
+  });
+  const dirCandidate = candidates.find((c) => c.command.includes("--dir"));
+  assert.equal(dirCandidate.command, "ferret review --dir src/pay");
+});

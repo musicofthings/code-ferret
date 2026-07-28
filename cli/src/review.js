@@ -6,7 +6,7 @@ import { repoRoot, ferretDir, scriptPath } from "./paths.js";
 import { resolveScope } from "./scope.js";
 import { detectAgent, runAgent } from "./agent.js";
 import { createEmitter, emitNoChanges } from "./events.js";
-import { readReview, sortFindings } from "./findings.js";
+import { readReview, sortFindings, tallySeverities } from "./findings.js";
 import { formatReport, formatCandidates } from "./report.js";
 import { computeCandidates } from "./candidates.js";
 import { appendHistory } from "./stats.js";
@@ -395,19 +395,19 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
 
   await mkdir(dir, { recursive: true });
   // Severity/vector strings come straight from LLM-authored JSON, so treat
-  // them as untrusted: normalize case (agent.js's own wire mapping already
-  // uppercases, so a lowercase "critical" must still count), and gate the
-  // increment on Object.hasOwn against a known key set rather than an
-  // `!== undefined` check, which is both case-sensitive and reachable via
-  // Object.prototype (a finding with severity: "constructor" would otherwise
-  // write a corrupted own "constructor" property that stats.js's aggregate()
-  // then string-concatenates into findings_total -- permanent, unrecoverable
-  // stats corruption from a single bad line).
-  const bySeverity = { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 };
+  // them as untrusted. tallySeverities (findings.js) normalizes case, accepts
+  // the CodeRabbit wire aliases, and gates on Object.hasOwn against a known
+  // key set rather than an `!== undefined` check -- the latter is both
+  // case-sensitive and reachable via Object.prototype, so a finding with
+  // severity: "constructor" would write a corrupted own "constructor"
+  // property that stats.js's aggregate() then string-concatenates into
+  // findings_total: permanent, unrecoverable stats corruption from one bad
+  // line. Anything still unrecognized is recorded under UNKNOWN rather than
+  // dropped, so history can never under-count the findings actually reported.
+  const { counts: bySeverity, unknown } = tallySeverities(findings);
+  if (unknown) bySeverity.UNKNOWN = unknown;
   const byVector = Object.create(null);
   for (const f of findings) {
-    const sev = String(f.severity ?? "").toUpperCase();
-    if (Object.hasOwn(bySeverity, sev)) bySeverity[sev] += 1;
     const vec = f.vector ? String(f.vector).toUpperCase() : null;
     if (vec) byVector[vec] = (byVector[vec] ?? 0) + 1;
   }

@@ -59,3 +59,20 @@ test("--base-commit alone resolves to that commit", () => {
   assert.equal(scope.target, "abc123");
   assert.equal(scope.baseRef, "abc123");
 });
+
+test("--uncommitted with --base is rejected rather than silently ignored", () => {
+  // The uncommitted target diffs against HEAD and carries baseRef: null, so an
+  // accepted --base would be discarded without a word -- the user would think
+  // they had scoped the review and get something else entirely.
+  assert.throws(
+    () => resolveScope({ uncommitted: true, base: "develop" }, {}),
+    ScopeError,
+  );
+});
+
+test("--uncommitted with --base-commit is rejected too", () => {
+  assert.throws(
+    () => resolveScope({ uncommitted: true, baseCommit: "abc123" }, {}),
+    ScopeError,
+  );
+});

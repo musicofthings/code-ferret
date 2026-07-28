@@ -208,8 +208,95 @@ test("I-3: a prototype-colliding severity does not leak into history", async () 
   });
   assert.equal(code, 0);
   const history = JSON.parse(readFileSync(join(cwd, ".ferret", "history.jsonl"), "utf8").trim());
-  assert.deepEqual(history.by_severity, { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 });
+  // Counted under UNKNOWN rather than silently dropped -- the finding IS in the
+  // report body, so history must not claim zero findings for this review.
+  assert.deepEqual(history.by_severity, {
+    CRITICAL: 0, WARNING: 0, SUGGESTION: 0, UNKNOWN: 1,
+  });
   assert.equal(Object.hasOwn(history.by_severity, "constructor"), false);
+});
+
+test("an unrecognized severity is surfaced in the tally, not dropped", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const stdout = capture();
+  const code = await main(["review", "--uncommitted"], {
+    stdout, stderr: capture(),
+    env: workingAgentEnv({ FAKE_SEVERITY: "INFO" }, SEVERITY_FIXTURE),
+    cwd,
+  });
+  assert.equal(code, 0);
+  // The report used to print the finding above a "0 critical · 0 warning ·
+  // 0 suggestions" line that contradicted it.
+  assert.match(stdout.text(), /1 unrecognized severity/);
+});
+
+test("a CodeRabbit wire severity name is accepted as its internal tier", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const stdout = capture();
+  const code = await main(["review", "--uncommitted"], {
+    stdout, stderr: capture(),
+    env: workingAgentEnv({ FAKE_SEVERITY: "major" }, SEVERITY_FIXTURE),
+    cwd,
+  });
+  assert.equal(code, 0);
+  assert.match(stdout.text(), /1 warning/);
+  const history = JSON.parse(readFileSync(join(cwd, ".ferret", "history.jsonl"), "utf8").trim());
+  assert.equal(history.by_severity.WARNING, 1);
+});
+
+test("review findings honors --agent instead of printing the human report", async () => {
+  const cwd = makeRepo();
+  mkdirSync(join(cwd, ".ferret"), { recursive: true });
+  writeFileSync(
+    join(cwd, ".ferret", "last-review.json"),
+    JSON.stringify({
+      findings: [{
+        file: "a.ts", line: 4, character: 2, severity: "CRITICAL",
+        vector: "LOGIC", confidence: "HIGH", message: "replayed",
+      }],
+      suppressed: 1, deduped: 2,
+    }),
+  );
+  const stdout = capture();
+  const code = await main(["review", "findings", "--agent"], {
+    stdout, stderr: capture(), env: brokenAgentEnv, cwd,
+  });
+  assert.equal(code, 0);
+  const events = stdout.text().trimEnd().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(events.map((e) => e.type), ["finding", "complete"]);
+  assert.equal(events[0].fileName, "a.ts");
+  assert.equal(events[1].suppressed, 1);
+});
+
+test("review findings surfaces a missing review as an --agent error event", async () => {
+  const cwd = makeRepo();
+  const stdout = capture();
+  const code = await main(["review", "findings", "--agent"], {
+    stdout, stderr: capture(), env: brokenAgentEnv, cwd,
+  });
+  assert.equal(code, 1);
+  const event = JSON.parse(stdout.text().trim());
+  assert.equal(event.type, "error");
+  assert.match(event.message, /No stored review found/);
+});
+
+test("--show-prompts --agent emits one parseable prompts event", async () => {
+  const cwd = makeRepo();
+  mkdirSync(join(cwd, ".ferret"), { recursive: true });
+  writeFileSync(
+    join(cwd, ".ferret", "last-prompts.json"),
+    JSON.stringify({ prompts: [{ name: "review", text: "line one\nline two" }] }),
+  );
+  const stdout = capture();
+  const code = await main(["review", "--show-prompts", "--agent"], {
+    stdout, stderr: capture(), env: brokenAgentEnv, cwd,
+  });
+  assert.equal(code, 0);
+  const event = JSON.parse(stdout.text().trim());
+  assert.equal(event.type, "prompts");
+  assert.equal(event.prompts[0].text, "line one\nline two");
 });
 
 test("I-5: a non-numeric FERRET_MAX_FILES falls back to the default limit, not disables it", async () => {

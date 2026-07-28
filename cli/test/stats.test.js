@@ -138,3 +138,49 @@ test("formatStats renders a human-readable summary", () => {
 test("formatStats reports an empty history plainly", () => {
   assert.match(formatStats(aggregate([])), /No reviews recorded yet/);
 });
+
+test("readStats does not create .ferret when there is no history", () => {
+  // A pure read must not materialize state: the MCP ferret_stats tool takes an
+  // arbitrary caller-supplied repo_path, and this used to litter a .ferret
+  // directory (plus .gitignore and stats.json) wherever it was pointed.
+  const dir = newDir();
+  return readStats(dir).then((stats) => {
+    assert.equal(stats.reviews, 0);
+    assert.equal(existsSync(dir), false);
+  });
+});
+
+test("aggregate survives a history line with prototype-colliding bucket names", async () => {
+  // history.jsonl is an append-only file that also holds lines from older
+  // versions and anything hand-edited, so aggregate cannot assume clean keys.
+  // Against a plain {}, "constructor" resolves through Object.prototype and
+  // concatenates a function into the count; "__proto__" drops the write.
+  const dir = newDir();
+  mkdirSync(dir, { recursive: true });
+  // Computed keys, not a plain `{ __proto__: 3 }` literal -- that form sets the
+  // prototype instead of creating an own property, so it would serialize to
+  // nothing and make this assertion vacuous.
+  await appendHistory(dir, {
+    ...ENTRY,
+    by_vector: { ["constructor"]: 2, ["__proto__"]: 3, LOGIC: 1 },
+  });
+  const raw = readFileSync(join(dir, "history.jsonl"), "utf8");
+  assert.ok(raw.includes("__proto__"), "the hostile key must survive into the file");
+
+  const stats = aggregate(await readHistory(dir));
+  assert.equal(stats.by_vector.constructor, 2);
+  assert.equal(typeof stats.by_vector.constructor, "number");
+  assert.equal(Object.hasOwn(stats.by_vector, "__proto__"), true);
+  assert.equal(stats.by_vector.LOGIC, 1);
+  assert.equal(Object.getPrototypeOf(stats.by_vector), null);
+});
+
+test("aggregate ignores a non-numeric count instead of poisoning the totals", async () => {
+  const dir = newDir();
+  mkdirSync(dir, { recursive: true });
+  await appendHistory(dir, { ...ENTRY, by_severity: { CRITICAL: "3" }, duration_ms: null });
+  const stats = aggregate(await readHistory(dir));
+  assert.equal(stats.findings_total, 0);
+  assert.equal(stats.by_severity.CRITICAL, 0);
+  assert.equal(stats.avg_duration_ms, 0);
+});

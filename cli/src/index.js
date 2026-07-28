@@ -28,7 +28,7 @@ Options:
   --agent                        Structured JSONL output for coding agents
   --light                        Faster review policy (LOGIC + SECURITY only)
   --show-prompts                 Print saved prompts from the last review
-  --dir <path>                   Review directory (must be a git repository)
+  --dir <path>                   Repository, or a subdirectory to scope to
   -c, --config <file>            Additional instruction file (repeatable)
   --agent-cmd <cmd>              Override host-agent detection
   -h, --help                     Show this help
@@ -115,39 +115,50 @@ export async function main(argv, io = {}) {
     return 1;
   }
 
-  const dir = ferretDir(workdir);
-  if (!dir) {
-    // Same contract as the other review-time failures below: a --agent
-    // consumer must get a parseable error event on stdout, not a silently
-    // empty JSONL stream plus a bare exit 1.
-    const message = "not inside a git repository";
+  // Every review-mode failure below must reach a --agent consumer as a
+  // parseable error event on stdout. Silently writing prose to stderr and
+  // exiting 1 leaves an agent parsing an empty JSONL stream with no idea why.
+  const fail = (message) => {
     if (values.agent) createEmitter({ agent: true, stdout }).error({ message });
     else stderr.write(`error: ${message}\n`);
     return 1;
-  }
+  };
+
+  const dir = ferretDir(workdir);
+  if (!dir) return fail("not inside a git repository");
 
   if (sub === "findings") {
     const review = await readReview(dir);
-    if (!review) {
-      stderr.write("error: No stored review found. Run `ferret review` first.\n");
-      return 1;
-    }
+    if (!review) return fail("No stored review found. Run `ferret review` first.");
     const findings = sortFindings(review.findings ?? []);
-    stdout.write(`${formatReport({ ...review, findings }, {
-      suppressed: review.suppressed ?? 0,
-      deduped: review.deduped ?? 0,
-    })}\n`);
+    const suppressed = review.suppressed ?? 0;
+    const deduped = review.deduped ?? 0;
+    // `--agent` is a promise about stdout's format, and it has to hold on the
+    // replay path too -- this used to print the human report regardless, so
+    // `ferret review findings --agent` handed a JSONL consumer prose. Mirrors
+    // runReview's success sequence: one event per finding, then complete.
+    if (values.agent) {
+      const emitter = createEmitter({ agent: true, stdout });
+      for (const finding of findings) emitter.finding(finding);
+      emitter.complete({
+        status: "completed", findings: findings.length, suppressed, deduped,
+      });
+    } else {
+      stdout.write(`${formatReport({ ...review, findings }, { suppressed, deduped })}\n`);
+    }
     return 0;
   }
 
   if (values["show-prompts"]) {
     const prompts = await readPrompts(dir);
-    if (!prompts) {
-      stderr.write("error: No saved prompts found. Run `ferret review` first.\n");
-      return 1;
-    }
-    for (const prompt of prompts.prompts ?? []) {
-      stdout.write(`=== ${prompt.name} ===\n${prompt.text}\n\n`);
+    if (!prompts) return fail("No saved prompts found. Run `ferret review` first.");
+    const list = prompts.prompts ?? [];
+    if (values.agent) {
+      createEmitter({ agent: true, stdout }).prompts(list);
+    } else {
+      for (const prompt of list) {
+        stdout.write(`=== ${prompt.name} ===\n${prompt.text}\n\n`);
+      }
     }
     return 0;
   }

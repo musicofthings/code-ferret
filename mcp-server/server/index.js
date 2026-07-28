@@ -46,6 +46,19 @@ function cliModule(name) {
   return import(pathToFileURL(join(ROOT, "cli", "src", name)).href);
 }
 
+/**
+ * Resolve a caller-supplied repo_path to that repository's .ferret directory,
+ * exactly as the CLI does. These tools previously used join(cwd, ".ferret")
+ * directly, which is only correct when repo_path happens to be the repository
+ * root: pointed at a subdirectory it reported "no reviews" for a repo that had
+ * plenty, and pointed anywhere else it silently answered for a .ferret that
+ * does not exist. Returns null when the path is not inside a git repository.
+ */
+async function resolveFerretDir(cwd) {
+  const { ferretDir } = await cliModule("paths.js");
+  return ferretDir(cwd);
+}
+
 function run(command, args, cwd) {
   return new Promise((resolvePromise) => {
     execFile(
@@ -242,8 +255,10 @@ server.registerTool(
   async ({ repo_path, rebuild }) => {
     const cwd = repo_path || process.cwd();
     try {
+      const dir = await resolveFerretDir(cwd);
+      if (!dir) return textResult(`${cwd} is not inside a git repository.`, true);
       const { readStats, formatStats } = await cliModule("stats.js");
-      return textResult(formatStats(await readStats(join(cwd, ".ferret"), { rebuild: Boolean(rebuild) })));
+      return textResult(formatStats(await readStats(dir, { rebuild: Boolean(rebuild) })));
     } catch (err) {
       return textResult(`Could not load the CodeFerret CLI: ${err.message}`, true);
     }
@@ -261,7 +276,9 @@ server.registerTool(
   async ({ repo_path }) => {
     const cwd = repo_path || process.cwd();
     try {
-      return textResult(await readFile(join(cwd, ".ferret", "last-review.json"), "utf8"));
+      const dir = await resolveFerretDir(cwd);
+      if (!dir) return textResult(`${cwd} is not inside a git repository.`, true);
+      return textResult(await readFile(join(dir, "last-review.json"), "utf8"));
     } catch {
       return textResult("No stored review found. Run the review prompt first.", true);
     }

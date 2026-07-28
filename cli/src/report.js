@@ -1,4 +1,4 @@
-import { sortFindings } from "./findings.js";
+import { sortFindings, tallySeverities } from "./findings.js";
 
 export function formatFinding(finding) {
   const loc = `${finding.file}:${finding.line ?? 1}:${finding.character ?? 1}`;
@@ -12,18 +12,18 @@ export function formatFinding(finding) {
 export function formatReport(review, tally = {}) {
   const { suppressed = 0, deduped = 0 } = tally;
   const findings = sortFindings(review.findings ?? []);
-  const counts = { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 };
-  for (const f of findings) {
-    // Normalize the same way review.js's history tally does, so the printed
-    // count and the recorded count never disagree on a lowercase (or
-    // prototype-colliding) severity string from the agent's JSON.
-    const sev = String(f.severity ?? "").toUpperCase();
-    if (Object.hasOwn(counts, sev)) counts[sev] += 1;
-  }
+  // Shared with review.js's history tally, so the printed count and the
+  // recorded count can never disagree on a lowercase, aliased, or
+  // prototype-colliding severity string from the agent's JSON.
+  const { counts, unknown } = tallySeverities(findings);
   const body = findings.map(formatFinding).join("\n\n");
+  // An unrecognized severity is surfaced rather than dropped: the finding is
+  // printed above, so omitting it here would make the tally contradict the
+  // body it closes.
+  const unknownNote = unknown ? ` · ${unknown} unrecognized severity` : "";
   const tallyLine =
     `${counts.CRITICAL} critical · ${counts.WARNING} warning · ` +
-    `${counts.SUGGESTION} suggestions ` +
+    `${counts.SUGGESTION} suggestions${unknownNote} ` +
     `(${suppressed} suppressed by cache, ${deduped} deduped)`;
   return body ? `${body}\n\n${tallyLine}` : tallyLine;
 }

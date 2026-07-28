@@ -1,5 +1,14 @@
 const MAX_CANDIDATES = 5;
 
+/**
+ * Quote a path for the copy-pasteable commands below. Directory names with
+ * spaces are ordinary ("src/My Components"), and unquoted they produce a
+ * suggestion that silently reviews the wrong path or fails outright.
+ */
+function quotePath(value) {
+  return /^[\w./@+-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 /** Count changed files per parent directory, most-changed first. */
 export function topDirectories(files) {
   const counts = new Map();
@@ -42,7 +51,7 @@ export function computeCandidates({
   for (const [dir, count] of topDirectories(files)) {
     if (candidates.length >= MAX_CANDIDATES) break;
     candidates.push({
-      command: `ferret review --dir ${dir}`,
+      command: `ferret review --dir ${quotePath(dir)}`,
       files: count,
       fits: count <= maxFiles,
     });

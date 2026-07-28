@@ -32,6 +32,16 @@ export function resolveScope(flags = {}, options = {}) {
   if (base && baseCommit) {
     throw new ScopeError("--base cannot be combined with --base-commit");
   }
+  // The "uncommitted" target diffs the working tree against HEAD and never
+  // consults a base ref, so accepting one would silently discard it -- the
+  // user would believe they had scoped the review and get something else.
+  // Every other contradictory combination throws; this one used to be ignored.
+  if (uncommitted && (base || baseCommit)) {
+    throw new ScopeError(
+      "--uncommitted cannot be combined with --base/--base-commit: it compares "
+        + "the working tree against HEAD, never against a base ref",
+    );
+  }
 
   const baseRef = baseCommit || base || defaultBase;
 
