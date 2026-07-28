@@ -98,9 +98,14 @@ function buildPrompt({ target, light, configFiles }) {
   const vectors = light
     ? "LOGIC and SECURITY only (light policy)"
     : "LOGIC, SECURITY, CONCURRENCY, PERFORMANCE, API";
+  // run_tools.py predates the "all"/"uncommitted" targets and only understands
+  // staged/head/a real base ref -- it rejects the other two as "unknown base
+  // ref". Approximate with "head" (working tree vs HEAD) rather than handing
+  // it a target guaranteed to make the analyzer step fail outright.
+  const analyzerTarget = target === "all" || target === "uncommitted" ? "head" : target;
   const analyzers = light
     ? "Skip the analyzer step entirely (light policy)."
-    : `Run \`python3 ${scriptPath("run_tools.py")} ${target}\` and read .ferret/tool-results.json. `
+    : `Run \`python3 ${scriptPath("run_tools.py")} ${analyzerTarget}\` and read .ferret/tool-results.json. `
       + "Treat analyzer findings as evidence and deduplicate equivalent semantic findings.";
   const extra = configFiles.length
     ? `Additional instruction files to honor: ${configFiles.join(", ")}.\n`
@@ -110,8 +115,10 @@ function buildPrompt({ target, light, configFiles }) {
 Load the code-ferret skill and follow its methodology exactly.
 ${extra}
 1. Collect context: \`bash ${scriptPath("collect-context.sh")} ${target}\`
-   The environment already carries FERRET_BASE_REF, FERRET_INCLUDE_UNTRACKED
-   and FERRET_LIGHT — do not override them.
+   The environment already carries FERRET_BASE_REF, FERRET_INCLUDE_UNTRACKED,
+   FERRET_LIGHT, and FERRET_DIR_PATHSPEC — do not override them. When
+   FERRET_DIR_PATHSPEC is set, the diff MUST stay restricted to that subtree;
+   never widen it back to the whole repository.
 2. ${analyzers}
 3. Read each changed file's enclosing scope and call sites of changed signatures.
 4. Analyze every hunk against these vectors: ${vectors}.
@@ -137,8 +144,9 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     stderr.write("error: not inside a git repository\n");
     return 1;
   }
-  const dir = ferretDir(cwd);
-  const scope = resolveScope(flags, { defaultBase: await defaultBase(root) });
+  const dir = ferretDir(cwd, root);
+  const defaultBaseRef = await defaultBase(root);
+  const scope = resolveScope(flags, { defaultBase: defaultBaseRef });
   const emitter = createEmitter({ agent: flags.agent, stdout });
 
   let branch = "unknown";
@@ -192,7 +200,11 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     const { candidates, candidatesNote } = computeCandidates({
       files,
       maxFiles,
-      committedFiles: await scopedGitFiles(root, ["diff", `${scope.baseRef}...HEAD`, "--name-only"], pathspec),
+      committedFiles: await scopedGitFiles(
+        root,
+        ["diff", `${scope.baseRef ?? defaultBaseRef}...HEAD`, "--name-only"],
+        pathspec,
+      ),
       uncommittedFiles: await scopedGitFiles(root, ["diff", "HEAD", "--name-only"], pathspec),
     });
     const message = `Review scope too large: ${files.length} files (limit ${maxFiles})`;
@@ -215,9 +227,16 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
 
   const agentEnv = {
     ...env,
-    FERRET_BASE_REF: scope.baseRef ?? "main",
+    FERRET_BASE_REF: scope.baseRef ?? defaultBaseRef,
     FERRET_INCLUDE_UNTRACKED: scope.includeUntracked ? "1" : "0",
     FERRET_LIGHT: flags.light ? "1" : "0",
+    // --dir's own file-count accounting (scopeFiles/scopedGitFiles above) has
+    // respected `pathspec` since Task 10's fix round, but nothing previously
+    // told collect-context.sh to actually narrow the diff it hands to the
+    // agent -- so a --dir scope's own promise not to expose other subtrees
+    // to the (third-party) host agent silently didn't hold. Empty string
+    // when unset so collect-context.sh's own default (".") applies.
+    FERRET_DIR_PATHSPEC: pathspec ?? "",
   };
   const prompt = buildPrompt({
     target: scope.target,
@@ -231,6 +250,16 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
   // returns it, `!review` is false, and both failure branches below become
   // unreachable -- the CLI reports the previous run's findings as fresh,
   // appends them to permanent history, and exits 0.
+  //
+  // KNOWN LIMITATION (not fixed -- no lock file, deliberately): two `ferret
+  // review` invocations against the same repo's .ferret directory (two
+  // terminals, or overlapping MCP tool calls) are not serialized. Whichever
+  // agent finishes last wins last-review.json/history.jsonl, and this rm can
+  // delete a just-completed review out from under a concurrent `ferret
+  // review findings` / `ferret_findings` read. `ferret` has never claimed to
+  // support concurrent invocations against one repo; fixing this for real
+  // needs a lock file (e.g. an O_EXCL-created .ferret/review.lock), which is
+  // a real feature, not a one-line patch -- out of scope here.
   await rm(join(dir, "last-review.json"), { force: true });
   await rm(join(dir, "last-prompts.json"), { force: true });
 

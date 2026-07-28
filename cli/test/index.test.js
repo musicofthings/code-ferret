@@ -10,6 +10,7 @@ import { main, parseFlags } from "../src/index.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = join(HERE, "fixtures", "fake-agent.js");
 const SEVERITY_FIXTURE = join(HERE, "fixtures", "severity-agent.js");
+const ECHO = join(HERE, "fixtures", "echo-args.js");
 
 // agent.js (Task 7) deliberately never uses a shell to invoke the host agent
 // (see its module comment), so FERRET_AGENT_CMD must name one literal
@@ -58,6 +59,13 @@ function makeRepo() {
 function capture() {
   const chunks = [];
   return { write: (s) => chunks.push(s), text: () => chunks.join("") };
+}
+
+/** The final non-empty output line, trimmed -- runReview's plain-mode "Reviewing
+ * N file(s)..." banner precedes the agent's own echoed output on stdout. */
+function lastLine(text) {
+  const lines = text.split("\n").filter((l) => l.trim());
+  return lines.at(-1).trim();
 }
 
 test("parseFlags reads the review subcommand and scope flags", () => {
@@ -408,4 +416,53 @@ test("running outside a git repository exits 1", async () => {
   });
   assert.equal(code, 1);
   assert.match(stderr.text(), /not inside a git repository/);
+});
+
+// Whole-branch review finding: run_tools.py predates the "all"/"uncommitted"
+// targets collect-context.sh gained in this plan -- its own validate_target()
+// only understands staged/head/a real base ref and raises "unknown base ref"
+// for the other two, silently breaking the analyzer step for the CLI's
+// default target ("all") and --uncommitted. buildPrompt() must approximate
+// with "head" for those two, leaving a real base ref (from --committed/--base)
+// untouched. echo-args.js reports back the exact prompt text sent to the
+// agent's argv so this pins the substitution without spawning a real analyzer.
+test("the analyzer step substitutes 'head' for the run_tools.py-incompatible 'uncommitted' target", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const stdout = capture();
+  const code = await main(["review", "--uncommitted"], {
+    stdout, stderr: capture(), env: workingAgentEnv({}, ECHO), cwd,
+  });
+  assert.equal(code, 1); // echo-args never writes last-review.json
+  const [prompt] = JSON.parse(lastLine(stdout.text()));
+  assert.match(prompt, /run_tools\.py head/);
+  assert.doesNotMatch(prompt, /run_tools\.py uncommitted/);
+});
+
+test("the analyzer step substitutes 'head' for the run_tools.py-incompatible 'all' (default) target", async () => {
+  const cwd = makeRepo();
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  const stdout = capture();
+  const code = await main(["review"], {
+    stdout, stderr: capture(), env: workingAgentEnv({}, ECHO), cwd,
+  });
+  assert.equal(code, 1);
+  const [prompt] = JSON.parse(lastLine(stdout.text()));
+  assert.match(prompt, /run_tools\.py head/);
+  assert.doesNotMatch(prompt, /run_tools\.py all/);
+});
+
+test("the analyzer step passes a real base ref through unchanged", async () => {
+  const cwd = makeRepo();
+  execFileSync("git", ["checkout", "-q", "-b", "feature"], { cwd });
+  writeFileSync(join(cwd, "app.txt"), "baseline\nchanged\n");
+  execFileSync("git", ["add", "."], { cwd });
+  execFileSync("git", ["commit", "-qm", "change"], { cwd });
+  const stdout = capture();
+  const code = await main(["review", "--committed", "--base", "main"], {
+    stdout, stderr: capture(), env: workingAgentEnv({}, ECHO), cwd,
+  });
+  assert.equal(code, 1);
+  const [prompt] = JSON.parse(lastLine(stdout.text()));
+  assert.match(prompt, /run_tools\.py main/);
 });

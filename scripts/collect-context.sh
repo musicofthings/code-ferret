@@ -8,11 +8,15 @@
 #   FERRET_BASE_REF          base ref for "all" mode (default: main)
 #   FERRET_INCLUDE_UNTRACKED force untracked-file inclusion for any mode
 #   FERRET_LIGHT             reduce diff context and skip file history
+#   FERRET_DIR_PATHSPEC      restrict every diff/file-list to this subtree
+#                            (default: "." = the whole repository)
 set -euo pipefail
 
 MODE="${1:-head}"
 BASE_REF="${FERRET_BASE_REF:-main}"
 LIGHT="${FERRET_LIGHT:-0}"
+DIR_PATHSPEC="${FERRET_DIR_PATHSPEC:-.}"
+[[ -z "$DIR_PATHSPEC" ]] && DIR_PATHSPEC="."
 CONTEXT_LINES=50
 if [[ "$LIGHT" == "1" ]]; then
   CONTEXT_LINES=10
@@ -71,7 +75,7 @@ if [[ "$INCLUDE_UNTRACKED" == "1" ]]; then
   fi
   while IFS= read -r -d '' file; do
     UNTRACKED+=("$file")
-  done < <(git ls-files "${UNTRACKED_ARGS[@]}")
+  done < <(git ls-files "${UNTRACKED_ARGS[@]}" -- "$DIR_PATHSPEC")
 fi
 
 echo "=== FERRET_META ==="
@@ -101,13 +105,13 @@ if [[ "$GUIDELINES_FOUND" -eq 0 ]]; then
 fi
 
 echo "=== FERRET_CHANGED_FILES ==="
-git diff "${DIFF_ARGS[@]}" --name-status -- . "${EXCLUDES[@]+"${EXCLUDES[@]}"}"
+git diff "${DIFF_ARGS[@]}" --name-status -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}"
 for file in "${UNTRACKED[@]}"; do
   printf 'A\t%s\n' "$file"
 done
 
 echo "=== FERRET_DEPENDENCY_MANIFESTS ==="
-git diff "${DIFF_ARGS[@]}" --name-only -- . "${EXCLUDES[@]+"${EXCLUDES[@]}"}" \
+git diff "${DIFF_ARGS[@]}" --name-only -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}" \
   | grep -E '(^|/)(package\.json|package-lock\.json|requirements.*\.txt|pyproject\.toml|go\.(mod|sum)|Cargo\.(toml|lock)|Gemfile|pom\.xml|build\.gradle.*)$' \
   || true
 for file in "${UNTRACKED[@]}"; do
@@ -120,7 +124,7 @@ echo "=== FERRET_FILE_HISTORY ==="
 if [[ "$LIGHT" == "1" ]]; then
   echo "(skipped: light mode)"
 else
-  git diff "${DIFF_ARGS[@]}" --name-only -- . "${EXCLUDES[@]+"${EXCLUDES[@]}"}" | while IFS= read -r f; do
+  git diff "${DIFF_ARGS[@]}" --name-only -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}" | while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     echo "--- $f"
     git log --oneline -n 5 --follow -- "$f" 2>/dev/null || echo "(no history)"
@@ -128,7 +132,7 @@ else
 fi
 
 echo "=== FERRET_DIFF ==="
-git diff "${DIFF_ARGS[@]}" -U"$CONTEXT_LINES" --no-color -- . "${EXCLUDES[@]+"${EXCLUDES[@]}"}"
+git diff "${DIFF_ARGS[@]}" -U"$CONTEXT_LINES" --no-color -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}"
 for file in "${UNTRACKED[@]}"; do
   git diff --no-index -U"$CONTEXT_LINES" --no-color -- /dev/null "$file" || status=$?
   if [[ "${status:-0}" -gt 1 ]]; then

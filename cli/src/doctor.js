@@ -41,7 +41,7 @@ export async function runDoctor({
     add("git repository", "fail", `${cwd} is not inside a git repository`);
   }
 
-  const dir = ferretDir(cwd);
+  const dir = ferretDir(cwd, root);
   if (!dir) {
     add("ferret storage", "warn", "unavailable outside a git repository");
   } else if (existsSync(dir)) {

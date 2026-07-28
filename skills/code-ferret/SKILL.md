@@ -125,8 +125,11 @@ for a full-depth pass.
 
 ## Oversized scopes
 
-The CLI refuses a scope larger than `reviews.max_files` (default 50) before
-invoking any agent, and suggests up to five narrower re-run commands. It never
-splits or retries automatically. This is separate from the >15-file guidance
-above, which applies to a review you are already performing: group hunks by
-directory and cover every one.
+The CLI refuses a scope larger than the `FERRET_MAX_FILES` env var (default
+50) before invoking any agent, and suggests up to five narrower re-run
+commands. It never splits or retries automatically. `.codeferret.yaml`'s
+`reviews.max_files` documents the same intent for the config file but is not
+currently read by the CLI (which has zero runtime dependencies and no YAML
+parser) — only the env var takes effect today. This is separate from the
+>15-file guidance above, which applies to a review you are already
+performing: group hunks by directory and cover every one.

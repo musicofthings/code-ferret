@@ -62,6 +62,32 @@ assert_contains "$LIGHT" "=== FERRET_FILE_HISTORY ==="
 assert_contains "$LIGHT_ON" "(skipped: light mode)"
 [[ "${#LIGHT_ON}" -lt "${#LIGHT}" ]] || fail "light mode should emit less context"
 
+# --- FERRET_DIR_PATHSPEC (--dir) must actually restrict what's collected ----
+# Whole-branch review finding: the CLI's own file-count accounting already
+# respected --dir, but nothing told collect-context.sh to narrow the diff it
+# hands to the host agent, so --dir's promise not to expose other subtrees to
+# a third-party LLM silently didn't hold. app.txt still has the uncommitted
+# "tracked edit" from above, and fresh.ts is still untracked -- both outside
+# "sub/".
+mkdir -p "$REPO/sub"
+printf 'baseline\n' > "$REPO/sub/scoped.txt"
+git -C "$REPO" add sub/scoped.txt
+git -C "$REPO" commit -qm "add sub/scoped.txt"
+printf 'scoped edit\n' >> "$REPO/sub/scoped.txt"
+printf 'new scoped file\n' > "$REPO/sub/fresh-scoped.ts"
+
+DIR_SCOPED="$(cd "$REPO" && FERRET_DIR_PATHSPEC=sub bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$DIR_SCOPED" "+++ b/sub/scoped.txt"
+[[ "$DIR_SCOPED" != *"+++ b/app.txt"* ]] || fail "FERRET_DIR_PATHSPEC must exclude tracked diffs outside the subtree"
+
+DIR_SCOPED_UT="$(cd "$REPO" && FERRET_DIR_PATHSPEC=sub FERRET_INCLUDE_UNTRACKED=1 bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$DIR_SCOPED_UT" "+++ b/sub/fresh-scoped.ts"
+[[ "$DIR_SCOPED_UT" != *"+++ b/fresh.ts"* ]] || fail "FERRET_DIR_PATHSPEC must exclude untracked files outside the subtree"
+
+UNSCOPED="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$UNSCOPED" "+++ b/app.txt"
+assert_contains "$UNSCOPED" "+++ b/sub/scoped.txt"
+
 set +e
 INVALID_CONTEXT="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" missing-ref 2>&1)"
 INVALID_CONTEXT_STATUS=$?

@@ -12,7 +12,9 @@ reviews:
     drafts: false
 
   # Refuse a review scope larger than this many files and suggest narrower
-  # scopes instead. Override per-run with the FERRET_MAX_FILES env var.
+  # scopes instead. NOT YET WIRED UP: the `ferret` CLI only reads the
+  # FERRET_MAX_FILES env var today (default 50) -- this key is aspirational
+  # until the CLI gains a config-file reader.
   max_files: 50
 
   ignore:

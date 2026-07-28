@@ -36,7 +36,7 @@ export function repoRoot(cwd) {
   }
 }
 
-export function ferretDir(cwd) {
-  const root = repoRoot(cwd);
+/** Pass `root` when the caller already resolved it, to skip a redundant git spawn. */
+export function ferretDir(cwd, root = repoRoot(cwd)) {
   return root ? join(root, ".ferret") : null;
 }
