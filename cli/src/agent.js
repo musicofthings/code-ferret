@@ -71,6 +71,50 @@ function describeSpawnFailure(err, agent) {
 }
 
 /**
+ * Parse a FERRET_AGENT_CMD/FERRET_AGENT override into { cmd, extra }.
+ *
+ * shell:false means the override can only ever name ONE literal executable
+ * -- there is no lexer here to split "node wrapper.js" or "claude --model
+ * opus" into a program plus arguments, and there deliberately never will be
+ * (see the block comment above CLAUDE_ALLOWED_TOOLS: a lexer is exactly what
+ * introducing a shell would smuggle back in). A bare value is always taken
+ * as that one executable, unchanged from the original behavior -- this is
+ * also why whitespace-splitting was rejected as the fix: the single most
+ * common real value on Windows, `C:\Program Files\nodejs\node.exe`, is
+ * itself a path containing a space, and splitting on whitespace would break
+ * that working case to fix the broken one.
+ *
+ * A value whose first non-whitespace character is `[` is instead parsed as
+ * a literal JSON argv array -- unambiguous, no quoting rules to get wrong,
+ * and it keeps argv[0] (probed by isInstalled) and the trailing arguments
+ * fully separate from the prompt, which is always appended last and never
+ * concatenated into anything that gets re-parsed.
+ */
+function parseAgentOverride(override) {
+  if (!override.trimStart().startsWith("[")) {
+    return { cmd: override, extra: [] };
+  }
+  let argv;
+  try {
+    argv = JSON.parse(override);
+  } catch (err) {
+    throw new Error(
+      `FERRET_AGENT_CMD/FERRET_AGENT looks like a JSON array (starts with "[") ` +
+        `but failed to parse: ${err.message}. Use a JSON array of strings, e.g. ` +
+        `'["C:\\\\path\\\\to\\\\node.exe", "wrapper.js"]'.`,
+    );
+  }
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some((v) => typeof v !== "string")) {
+    throw new Error(
+      "FERRET_AGENT_CMD/FERRET_AGENT is a JSON value but not a non-empty array " +
+        'of strings, e.g. \'["C:\\\\path\\\\to\\\\node.exe", "wrapper.js"]\'.',
+    );
+  }
+  const [cmd, ...extra] = argv;
+  return { cmd, extra };
+}
+
+/**
  * Pick the host agent: explicit override first, then first installed.
  *
  * The override is run through the same isInstalled probe as the built-ins —
@@ -84,15 +128,20 @@ function describeSpawnFailure(err, agent) {
 export function detectAgent({ env = process.env, isInstalled = defaultIsInstalled } = {}) {
   const override = env.FERRET_AGENT_CMD || env.FERRET_AGENT;
   if (override) {
-    if (!isInstalled(override)) {
+    const { cmd, extra } = parseAgentOverride(override);
+    if (!isInstalled(cmd)) {
       throw new Error(
         `FERRET_AGENT_CMD/FERRET_AGENT is set to "${override}", but it can't be ` +
           "spawned (it may be a Windows .cmd/.bat shim, not on PATH, or not " +
           "executable). Point it at a directly executable binary, or unset it " +
-          "to fall back to auto-detecting claude/codex/gemini.",
+          "to fall back to auto-detecting claude/codex/gemini. If you need to " +
+          "pass arguments (e.g. a wrapper script, or \"claude --model opus\"), " +
+          'use a JSON array instead: \'["cmd", "arg1", "arg2"]\' -- a plain ' +
+          '"cmd arg1 arg2" string can never be spawned here, since no shell ' +
+          "is used to split it.",
       );
     }
-    return { name: "custom", cmd: override, args: (prompt) => [prompt] };
+    return { name: "custom", cmd, args: (prompt) => [...extra, prompt] };
   }
   for (const agent of AGENTS) {
     if (isInstalled(agent.cmd)) return agent;

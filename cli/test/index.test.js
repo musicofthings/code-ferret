@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { main, parseFlags } from "../src/index.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -13,33 +13,33 @@ const SEVERITY_FIXTURE = join(HERE, "fixtures", "severity-agent.js");
 
 // agent.js (Task 7) deliberately never uses a shell to invoke the host agent
 // (see its module comment), so FERRET_AGENT_CMD must name one literal
-// executable with no embedded arguments -- a "node <script>" string cannot
-// be spawned this way: spawnSync/CreateProcess treats the whole string as
-// one (nonexistent) filename and fails with ENOENT, which detectAgent turns
-// into "can't be spawned". `FAKE`/`brokenAgentEnv` below are kept exactly
-// for that: tests that only need detection to fail *softly* (never crash,
-// never spawn) use it deliberately. It is guaranteed broken -- do not use it
-// where a test needs a review to actually complete.
+// executable with no embedded arguments -- a bare "node <script>" string
+// cannot be spawned this way: spawnSync/CreateProcess treats the whole
+// string as one (nonexistent) filename and fails with ENOENT, which
+// detectAgent turns into "can't be spawned". `FAKE`/`brokenAgentEnv` below
+// are kept exactly for that: tests that only need detection to fail
+// *softly* (never crash, never spawn) use it deliberately. It is
+// guaranteed broken -- do not use it where a test needs a review to
+// actually complete.
 const FAKE = `${process.execPath} ${FIXTURE}`;
 const brokenAgentEnv = { ...process.env, FERRET_AGENT_CMD: FAKE };
 
-// To drive a review to genuine completion without spawning a real coding
-// agent, point FERRET_AGENT_CMD at node itself (a real, single, spawnable
-// executable -- defaultIsInstalled's `node --version` probe succeeds
-// trivially, no preload needed) and use NODE_OPTIONS=--import to preload a
-// fixture for the *actual* invocation. The fixture's whole body is
-// synchronous top-level code ending in process.exit(), so it completes --
-// writing .ferret/last-review.json and printing its progress lines --
-// before node ever tries to resolve the (huge, non-path) review prompt as an
-// entry module. Building the env per-call (rather than mutating the real
-// process.env, as an earlier version of this file did) means the
-// isInstalled probe never sees NODE_OPTIONS and never runs the fixture, so
-// there is no stray cli/.ferret/ side effect to clean up.
+// Fix round 2, finding 2: agent.js's detectAgent now accepts an explicit
+// JSON argv array in FERRET_AGENT_CMD/FERRET_AGENT (a value starting with
+// "["), which is the real, documented way to point it at a program plus
+// arguments -- unlike the bare-string form, which can only ever name one
+// literal executable. This drives the fixture through the JSON-array form:
+// argv[0] is the real node binary (a genuinely installed, spawnable
+// executable), the fixture path is the first extra argument, so the child
+// is invoked exactly as `node <fixture>`, its entry module resolves
+// normally, and it runs to completion and writes .ferret/last-review.json
+// like any real host agent would. This replaced an earlier
+// NODE_OPTIONS=--import preload workaround from before agent.js supported
+// this form -- no longer needed.
 function workingAgentEnv(extra = {}, fixture = FIXTURE) {
   return {
     ...process.env,
-    FERRET_AGENT_CMD: process.execPath,
-    NODE_OPTIONS: `--import ${pathToFileURL(fixture).href}`,
+    FERRET_AGENT_CMD: JSON.stringify([process.execPath, fixture]),
     ...extra,
   };
 }
@@ -262,6 +262,37 @@ test("I-2: --dir narrows scope to a subtree via a git pathspec", async () => {
   assert.equal(scopedFiles, 1);
 });
 
+test("fix round 2, finding 1: oversized-diff candidates respect the active --dir scope", async () => {
+  // Probe from the finding: 2 changed files under src/, 60 under other/. Run
+  // scoped to --dir src with a limit of 1 -- the scope check correctly sees
+  // only the 2 files under src/ and refuses, but before this fix the
+  // candidates were computed against gitFiles(root, ...) directly (bypassing
+  // scopeFiles' pathspec), so "ferret review --uncommitted" was suggested at
+  // ~62 files -- the whole repo, ignoring the --dir the user already
+  // applied, and still over the limit either way.
+  const cwd = makeRepo();
+  mkdirSync(join(cwd, "src"));
+  mkdirSync(join(cwd, "other"));
+  writeFileSync(join(cwd, "src", "a.txt"), "a\n");
+  writeFileSync(join(cwd, "src", "b.txt"), "b\n");
+  for (let i = 0; i < 60; i += 1) writeFileSync(join(cwd, "other", `f${i}.txt`), "x\n");
+  execFileSync("git", ["add", "."], { cwd });
+  execFileSync("git", ["commit", "-qm", "seed"], { cwd });
+  writeFileSync(join(cwd, "src", "a.txt"), "a changed\n");
+  writeFileSync(join(cwd, "src", "b.txt"), "b changed\n");
+  for (let i = 0; i < 60; i += 1) writeFileSync(join(cwd, "other", `f${i}.txt`), "changed\n");
+
+  const stderr = capture();
+  const code = await main(
+    ["review", "--uncommitted", "--dir", join(cwd, "src")],
+    { stdout: capture(), stderr, env: workingAgentEnv({ FERRET_MAX_FILES: "1" }), cwd },
+  );
+  assert.equal(code, 1);
+  assert.match(stderr.text(), /Review scope too large: 2 files \(limit 1\)/);
+  assert.match(stderr.text(), /ferret review --uncommitted\s*\n\s*~2 files/);
+  assert.doesNotMatch(stderr.text(), /~62 files/);
+});
+
 test("an empty diff emits the review_skipped sequence and never spawns an agent", async () => {
   const cwd = makeRepo();
   const stdout = capture();
@@ -322,11 +353,14 @@ test("--show-prompts prints saved prompts without reviewing", async () => {
 });
 
 test("doctor reports every check and returns a usable exit code", async () => {
+  // Fix round 2: the deterministic exit-code assertion moved to the "M-7"
+  // test below (which uses brokenAgentEnv and can actually fail). This test
+  // just checks doctor is wired up and reports the checks, with a working
+  // agent so it doesn't (incidentally) also exercise the failure path.
   const stdout = capture();
-  const code = await main(["doctor"], {
+  await main(["doctor"], {
     stdout, stderr: capture(), env: workingAgentEnv(), cwd: makeRepo(),
   });
-  assert.ok(code === 0 || code === 1);
   assert.match(stdout.text(), /host agent/);
   assert.match(stdout.text(), /git repository/);
 });

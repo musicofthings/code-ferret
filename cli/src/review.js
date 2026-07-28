@@ -45,6 +45,17 @@ async function gitFiles(cwd, args) {
 }
 
 /**
+ * `gitFiles`, narrowed to `pathspec` (the `--dir` subtree) when one is given.
+ * This is the ONE place the `["--", pathspec]` suffix is built -- every git
+ * call that must respect `--dir` (scope resolution AND the oversized-diff
+ * candidate counts) goes through this, so `--dir` can't quietly stop
+ * applying to a call added later.
+ */
+async function scopedGitFiles(cwd, args, pathspec) {
+  return gitFiles(cwd, pathspec ? [...args, "--", pathspec] : args);
+}
+
+/**
  * Files in scope, used for the empty-diff check and candidate computation.
  * `pathspec`, when set, narrows every git call to that subtree (see the
  * `--dir` handling in runReview) -- without it, `--dir` only changed which
@@ -52,24 +63,23 @@ async function gitFiles(cwd, args) {
  * resolves back to the toplevel.
  */
 async function scopeFiles(cwd, scope, pathspec) {
-  const spec = pathspec ? ["--", pathspec] : [];
   if (scope.target === "uncommitted") {
-    const tracked = await gitFiles(cwd, ["diff", "HEAD", "--name-only", ...spec]);
+    const tracked = await scopedGitFiles(cwd, ["diff", "HEAD", "--name-only"], pathspec);
     if (!scope.includeUntracked) return tracked;
     return [
       ...tracked,
-      ...(await gitFiles(cwd, ["ls-files", "--others", "--exclude-standard", ...spec])),
+      ...(await scopedGitFiles(cwd, ["ls-files", "--others", "--exclude-standard"], pathspec)),
     ];
   }
   if (scope.target === "all") {
-    const changed = await gitFiles(cwd, ["diff", scope.baseRef, "--name-only", ...spec]);
+    const changed = await scopedGitFiles(cwd, ["diff", scope.baseRef, "--name-only"], pathspec);
     if (!scope.includeUntracked) return changed;
     return [
       ...changed,
-      ...(await gitFiles(cwd, ["ls-files", "--others", "--exclude-standard", ...spec])),
+      ...(await scopedGitFiles(cwd, ["ls-files", "--others", "--exclude-standard"], pathspec)),
     ];
   }
-  return gitFiles(cwd, ["diff", `${scope.target}...HEAD`, "--name-only", ...spec]);
+  return scopedGitFiles(cwd, ["diff", `${scope.target}...HEAD`, "--name-only"], pathspec);
 }
 
 /**
@@ -175,11 +185,15 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
   const rawMaxFiles = Number.parseInt(env.FERRET_MAX_FILES ?? "", 10);
   const maxFiles = Number.isInteger(rawMaxFiles) && rawMaxFiles > 0 ? rawMaxFiles : DEFAULT_MAX_FILES;
   if (files.length > maxFiles) {
+    // Route through the same pathspec-aware helper scopeFiles uses -- these
+    // candidate counts must reflect the active --dir scope too, or the
+    // suggested "narrower" commands (computed against the whole repo) can
+    // still be over the limit even after the user already scoped down.
     const { candidates, candidatesNote } = computeCandidates({
       files,
       maxFiles,
-      committedFiles: await gitFiles(root, ["diff", `${scope.baseRef}...HEAD`, "--name-only"]),
-      uncommittedFiles: await gitFiles(root, ["diff", "HEAD", "--name-only"]),
+      committedFiles: await scopedGitFiles(root, ["diff", `${scope.baseRef}...HEAD`, "--name-only"], pathspec),
+      uncommittedFiles: await scopedGitFiles(root, ["diff", "HEAD", "--name-only"], pathspec),
     });
     const message = `Review scope too large: ${files.length} files (limit ${maxFiles})`;
     if (flags.agent) emitter.error({ message, candidates, candidatesNote });

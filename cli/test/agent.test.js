@@ -50,6 +50,85 @@ test("FERRET_AGENT_CMD overrides detection", () => {
   assert.deepEqual(agent.args("hello"), ["hello"]);
 });
 
+// Fix round 2, finding 2: a bare override is still a single literal
+// executable path, byte-for-byte as before -- including one containing a
+// space (the common real-world Windows case, `C:\Program Files\...\node.exe`)
+// which must NOT be split.
+test("a bare FERRET_AGENT_CMD containing a space is still one literal path, not split", () => {
+  const withSpace = "C:\\Program Files\\nodejs\\node.exe";
+  const agent = detectAgent({
+    env: { FERRET_AGENT_CMD: withSpace },
+    isInstalled: (cmd) => cmd === withSpace,
+  });
+  assert.equal(agent.cmd, withSpace);
+  assert.deepEqual(agent.args("hello"), ["hello"]);
+});
+
+// Fix round 2, finding 2: shell:false means FERRET_AGENT_CMD can only ever
+// name one literal executable -- "node wrapper.js" can never be spawned,
+// and whitespace-splitting was rejected as the fix (it would break the path-
+// with-a-space case above). A JSON array is the unambiguous alternative:
+// argv[0] is probed by isInstalled, the rest are prepended to the prompt.
+test("a JSON-array FERRET_AGENT_CMD resolves to the right cmd and args", () => {
+  const seen = [];
+  const agent = detectAgent({
+    env: { FERRET_AGENT_CMD: '["/usr/bin/node", "wrapper.js", "--flag"]' },
+    isInstalled: (cmd) => { seen.push(cmd); return true; },
+  });
+  assert.equal(agent.name, "custom");
+  assert.equal(agent.cmd, "/usr/bin/node");
+  // isInstalled must probe argv[0] only, never the full array or a joined string.
+  assert.deepEqual(seen, ["/usr/bin/node"]);
+  assert.deepEqual(agent.args("the prompt"), ["wrapper.js", "--flag", "the prompt"]);
+});
+
+test("a malformed JSON-array FERRET_AGENT_CMD throws an actionable message, not a raw SyntaxError", () => {
+  assert.throws(
+    () => detectAgent({
+      env: { FERRET_AGENT_CMD: '["unterminated' },
+      isInstalled: () => true,
+    }),
+    (err) => {
+      assert.ok(!(err instanceof SyntaxError), "must not leak a raw SyntaxError");
+      assert.match(err.message, /FERRET_AGENT_CMD/);
+      assert.match(err.message, /JSON array/);
+      return true;
+    },
+  );
+});
+
+test("a JSON value that parses but isn't a non-empty string array throws an actionable message", () => {
+  assert.throws(
+    () => detectAgent({
+      env: { FERRET_AGENT_CMD: "[42, true]" },
+      isInstalled: () => true,
+    }),
+    (err) => {
+      assert.match(err.message, /FERRET_AGENT_CMD/);
+      assert.match(err.message, /array of strings/);
+      return true;
+    },
+  );
+});
+
+// Fix round 2, finding 2: the "can't be spawned" message previously
+// misdiagnosed "cmd with arguments" as a PATH/shim problem. It must now
+// point the user at the JSON-array form instead of sending them chasing a
+// PATH issue that isn't the actual cause.
+test("the 'can't be spawned' message points a multi-word override at the JSON-array form", () => {
+  assert.throws(
+    () => detectAgent({
+      env: { FERRET_AGENT_CMD: "claude --model opus" },
+      isInstalled: () => false,
+    }),
+    (err) => {
+      assert.match(err.message, /JSON array/);
+      assert.match(err.message, /FERRET_AGENT_CMD/);
+      return true;
+    },
+  );
+});
+
 // Fix round 3, finding 4: the override must not exempt itself from the
 // "an agent runAgent cannot spawn must not be reported as installed"
 // guarantee, and the failure must be actionable, not a generic
