@@ -110,3 +110,23 @@ scrub credentials: run `bash ${CLAUDE_PLUGIN_ROOT}/scripts/scan-secrets.sh` to
 locate them, and replace any detected token with `[REDACTED_SECRET]` in your
 output. Hardcoded secrets are themselves a CRITICAL/SECURITY finding — report
 the location, never the value.
+
+## Light policy
+
+When `FERRET_LIGHT=1` (the CLI's `--light`), trade depth for speed:
+
+- skip the installed-analyzer step entirely
+- diff context is already reduced to `-U10` by `collect-context.sh`
+- `FERRET_FILE_HISTORY` is absent — do not treat that as "no prior history"
+- analyze only the LOGIC and SECURITY vectors
+
+Say in the report that the run was light, so a clean result is not mistaken
+for a full-depth pass.
+
+## Oversized scopes
+
+The CLI refuses a scope larger than `reviews.max_files` (default 50) before
+invoking any agent, and suggests up to five narrower re-run commands. It never
+splits or retries automatically. This is separate from the >15-file guidance
+above, which applies to a review you are already performing: group hunks by
+directory and cover every one.

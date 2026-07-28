@@ -11,6 +11,10 @@ reviews:
     enabled: true
     drafts: false
 
+  # Refuse a review scope larger than this many files and suggest narrower
+  # scopes instead. Override per-run with the FERRET_MAX_FILES env var.
+  max_files: 50
+
   ignore:
     - "dist/**"
     - "coverage/**"
