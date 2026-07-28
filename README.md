@@ -236,17 +236,6 @@ git config codeferret.root "$(pwd)"
 If the target repository is not the CodeFerret checkout, set
 `codeferret.root` to CodeFerret's absolute installation path instead.
 
-## GitHub PR automation (optional, and not local)
-
-`examples/github-workflow.yml` runs CodeFerret's methodology on every pull
-request via `claude-code-action`. Copy it into `.github/workflows/` and set the
-`ANTHROPIC_API_KEY` repository secret.
-
-This is the one path in this repository that is **not** local: it runs on
-GitHub's runners and sends your diff to a model API under your own API key and
-account. Nothing else in CodeFerret does that, and nothing requires you to use
-it. Skip this section entirely to keep every review on your own machine.
-
 ## Privacy guardrails
 
 - Reviews run on your machine, through a coding agent you already installed.
@@ -284,5 +273,5 @@ code-ferret/
 ├── cli/                            # standalone `ferret` CLI (delegates to your agent)
 ├── mcp-server/                     # MCP server + MCPB bundle build (Claude Desktop et al.)
 ├── packaging/                      # Codex prompts/config, Claude Desktop install guide
-└── examples/                       # optional GitHub Action workflow, native git hook
+└── examples/                       # native git pre-commit hook
 ```
