@@ -1,8 +1,20 @@
 import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
 export const LOCK_NAME = "review.lock";
+
+/**
+ * Default lease for a lock held across separate calls (the MCP prompt-driven
+ * flow) rather than for the lifetime of one process.
+ *
+ * Matched to runAgent's 30-minute ceiling: long enough that a real review is
+ * never interrupted, short enough that an abandoned one frees the repository
+ * without anyone deleting a file by hand. `ferret_review_lock` exposes
+ * `status` and a forced `release` for recovering sooner.
+ */
+export const LEASE_MS = 30 * 60 * 1000;
 
 /**
  * How long a lock may sit before another process is allowed to reclaim it.
@@ -64,7 +76,19 @@ export function isStale(lock, { host, now }) {
   if (!lock) return true;
   const started = Date.parse(lock.started_at ?? "");
   const age = now - started;
-  if (!Number.isFinite(age) || age > STALE_MS) return true;
+  if (!Number.isFinite(age)) return true;
+
+  // A leased lock carries its own expiry and that expiry is the whole answer.
+  // Leases exist for holders whose process liveness says nothing about whether
+  // the review is still going: the MCP server holds its lock across separate
+  // tool calls, so its pid stays alive whether the agent is still reviewing,
+  // has finished without releasing, or abandoned the session entirely.
+  if (lock.expires_at) {
+    const expires = Date.parse(lock.expires_at);
+    return !Number.isFinite(expires) || now > expires;
+  }
+
+  if (age > STALE_MS) return true;
   // A lock stamped in the future is a clock skew artifact, not a live holder
   // we can reason about -- fall through to the identity check rather than
   // treating a negative age as "fresh forever".
@@ -73,11 +97,18 @@ export function isStale(lock, { host, now }) {
 }
 
 function describeHolder(holder) {
-  if (!holder) return "another `ferret review` is already running on this repository";
+  // Name the right thing: telling someone "another `ferret review` is running"
+  // when the holder is an MCP prompt-driven review sends them looking for a
+  // terminal that does not exist.
+  const what = holder?.kind === "mcp"
+    ? "an MCP CodeFerret review"
+    : "another `ferret review`";
+  if (!holder) return `${what} is already running on this repository`;
   const who = holder.pid ? `pid ${holder.pid}` : "an unknown process";
   const where = holder.host ? ` on ${holder.host}` : "";
   const when = holder.started_at ? `, started ${holder.started_at}` : "";
-  return `another \`ferret review\` is already running on this repository (${who}${where}${when})`;
+  const until = holder.expires_at ? `, lease expires ${holder.expires_at}` : "";
+  return `${what} is already running on this repository (${who}${where}${when}${until})`;
 }
 
 /**
@@ -95,16 +126,32 @@ function describeHolder(holder) {
  */
 export async function acquireReviewLock(
   ferretDir,
-  { target = null, pid = process.pid, host = hostname(), now = Date.now() } = {},
+  {
+    target = null,
+    kind = "cli",
+    ttlMs = null,
+    token = randomUUID(),
+    pid = process.pid,
+    host = hostname(),
+    now = Date.now(),
+  } = {},
 ) {
   await mkdir(ferretDir, { recursive: true });
   const path = join(ferretDir, LOCK_NAME);
-  const payload = JSON.stringify({
+  const holder = {
     pid,
     host,
     target,
+    kind,
+    // Identifies this acquisition, not the process. The MCP flow acquires in
+    // one tool call and releases in another, so release has to prove it owns
+    // the lock it is dropping -- otherwise a second agent that found the lock
+    // free after an expiry could release the first agent's fresh one.
+    token,
     started_at: new Date(now).toISOString(),
-  });
+    ...(ttlMs ? { expires_at: new Date(now + ttlMs).toISOString() } : {}),
+  };
+  const payload = JSON.stringify(holder);
 
   // Two passes at most: the first may find a stale lock to clear, the second
   // is the real attempt. Anything beyond that means a genuine contender keeps
@@ -117,12 +164,12 @@ export async function acquireReviewLock(
       handle = await open(path, "wx");
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
-      const holder = await readLock(path);
-      if (!isStale(holder, { host, now })) {
+      const existing = await readLock(path);
+      if (!isStale(existing, { host, now })) {
         throw new LockBusyError(
-          `${describeHolder(holder)}. Wait for it to finish, or remove `
+          `${describeHolder(existing)}. Wait for it to finish, or remove `
             + `${join(ferretDir, LOCK_NAME)} if you are sure it is not.`,
-          holder,
+          existing,
         );
       }
       // Stale: clear it and let the loop retry. If a third process wins the
@@ -136,7 +183,7 @@ export async function acquireReviewLock(
     } finally {
       await handle.close();
     }
-    return { path, release: () => releaseLock(path) };
+    return { path, token, holder, release: () => releaseLock(path) };
   }
 
   throw new LockBusyError(describeHolder(await readLock(path)), null);
@@ -150,4 +197,35 @@ export async function releaseLock(path) {
   try {
     await rm(path, { force: true });
   } catch { /* best effort */ }
+}
+
+/** Describe the current holder, or null when the lock is free or expired. */
+export async function inspectLock(ferretDir, { host = hostname(), now = Date.now() } = {}) {
+  const holder = await readLock(join(ferretDir, LOCK_NAME));
+  if (!holder || isStale(holder, { host, now })) return null;
+  return holder;
+}
+
+/**
+ * Release a lock acquired in an earlier call, proving ownership with its token.
+ *
+ * `force` skips the ownership check, for recovering a repository whose holder
+ * abandoned it without waiting out the lease. It is deliberately explicit: a
+ * silent unconditional release would let one agent drop another's live lock
+ * and reintroduce exactly the concurrent-write race the lock exists to stop.
+ */
+export async function releaseReviewLock(ferretDir, { token = null, force = false } = {}) {
+  const path = join(ferretDir, LOCK_NAME);
+  const holder = await readLock(path);
+  if (!holder) return { released: false, reason: "no review lock is held" };
+  if (!force && holder.token && holder.token !== token) {
+    return {
+      released: false,
+      reason: `the lock is held by a different review (${describeHolder(holder)}). `
+        + "Pass force to release it anyway.",
+      holder,
+    };
+  }
+  await releaseLock(path);
+  return { released: true, holder };
 }

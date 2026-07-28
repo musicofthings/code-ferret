@@ -147,6 +147,19 @@ that holds the lock, rather than queueing or letting two agents overwrite each
 other's results. A lock left behind by a killed process is reclaimed
 automatically — either its process is gone, or it has aged out.
 
+The MCP review prompt takes the same lock through the `ferret_review_lock`
+tool, so a prompt-driven review and a terminal `ferret review` cannot run
+against one repository at once. That path holds a **30-minute lease** rather
+than a process-lifetime lock: the MCP server stays alive between tool calls, so
+its process being up says nothing about whether a review is still going, and
+only an expiry can free one that was abandoned mid-conversation. Use
+`ferret_review_lock` with `status` to see the holder, or `release` with `force`
+to clear an abandoned lock without waiting out the lease.
+
+Because the agent writes `.ferret/last-review.json` with its own file tools
+rather than through the server, this lock is **cooperative** — it is honored by
+the shipped review prompt, not enforced against an agent that ignores it.
+
 Every `ferret review` spawns a real agent session against your existing
 subscription. Use `--light` for the cheap path, and keep the git pre-commit
 hook on the pure-bash secret scan rather than a full review.

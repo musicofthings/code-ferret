@@ -285,18 +285,82 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "ferret_review_lock",
+  {
+    title: "Hold the repository review lock",
+    description:
+      "Serialize this review against other CodeFerret reviews on the same repository. Actions: 'acquire' (before collecting context; returns a token, or reports who holds it), 'release' (when the review finishes or stops early; pass the token), 'status' (who holds it now). Reviews write shared files under .ferret, so two running at once overwrite each other's results. Always release what you acquire.",
+    inputSchema: {
+      repo_path: repoPathArg,
+      action: z.enum(["acquire", "release", "status"]),
+      token: z.string().optional().describe("The token returned by acquire (required to release)"),
+      force: z
+        .boolean()
+        .optional()
+        .describe("Release a lock you do not hold — only for clearing an abandoned review"),
+      target: targetArg,
+    },
+  },
+  async ({ repo_path, action, token, force, target }) => {
+    const cwd = repo_path || process.cwd();
+    try {
+      const dir = await resolveFerretDir(cwd);
+      if (!dir) return textResult(`${cwd} is not inside a git repository.`, true);
+      const lock = await cliModule("lock.js");
+
+      if (action === "status") {
+        const holder = await lock.inspectLock(dir);
+        return textResult(
+          holder
+            ? `Held by ${holder.kind} (pid ${holder.pid} on ${holder.host}), started ${holder.started_at}`
+              + `${holder.expires_at ? `, lease expires ${holder.expires_at}` : ""}.`
+            : "No review lock is held.",
+        );
+      }
+
+      if (action === "release") {
+        const result = await lock.releaseReviewLock(dir, { token, force: Boolean(force) });
+        return textResult(
+          result.released ? "Review lock released." : result.reason,
+          !result.released,
+        );
+      }
+
+      // A lease, not a process-lifetime lock: this server's pid stays alive
+      // between tool calls whether the agent is still reviewing or walked away,
+      // so an expiry is the only thing that can free an abandoned review.
+      const held = await lock.acquireReviewLock(dir, {
+        kind: "mcp",
+        ttlMs: lock.LEASE_MS,
+        target: target || null,
+      });
+      return textResult(
+        `Review lock acquired. token: ${held.token}\n`
+          + `Lease expires ${held.holder.expires_at}. Release it with action "release" and this `
+          + "token as soon as the review finishes, including if you stop early.",
+      );
+    } catch (err) {
+      if (err?.name === "LockBusyError") return textResult(err.message, true);
+      return textResult(`Could not load the CodeFerret CLI: ${err.message}`, true);
+    }
+  },
+);
+
 const REVIEW_PROMPT = (target) => `Run a full CodeFerret semantic review of this repository's diff (target: ${target}).
 
 CodeFerret hunts deep architectural flaws, never style. Follow this workflow exactly:
 
 1. Call the ferret_methodology tool and internalize the five detection vectors, confidence calibration, and output schema.
-2. Call ferret_collect_context with target "${target}". If the diff is empty, say so and stop. If it is very large (>15 files), review in directory-grouped batches so no hunk is skipped.
-3. Call ferret_run_analyzers with the same target. Treat analyzer findings as evidence; deduplicate equivalent semantic findings instead of reporting them twice.
-4. Read each changed file's relevant scope (enclosing functions/classes, call sites of changed signatures). Use the FERRET_FILE_HISTORY section to spot regressions of previously fixed bugs.
-5. Analyze every hunk against all five vectors: LOGIC, SECURITY, CONCURRENCY, PERFORMANCE, API. Only report issues caused or exposed by the diff, each with a concrete failure scenario.
-6. Filter noise: drop findings a configured linter already enforces; call ferret_fp_cache with action "check" for each remaining finding and drop suppressed ones (count them); assign severity (CRITICAL/WARNING/SUGGESTION) and confidence (HIGH/MEDIUM/LOW) per the methodology.
-7. Write the findings JSON to .ferret/last-review.json per the output schema, then print the report: findings ordered CRITICAL → WARNING → SUGGESTION with clickable file:line:col locations, one-line message, failure-scenario explanation, and a ready-to-apply unified diff patch when a safe fix exists. Close with the tally including suppressed and deduped counts.
-8. Scrub any credential values from your output as [REDACTED_SECRET] (hardcoded secrets are themselves CRITICAL/SECURITY findings — report location, never value).`;
+2. Call ferret_review_lock with action "acquire" and keep the token it returns. This review writes shared files under .ferret; without the lock a concurrent review overwrites your results, or you overwrite theirs. If it reports the lock is held, do NOT proceed — tell the user who holds it and stop. From here on, you MUST release the lock before you finish: call ferret_review_lock with action "release" and your token at the end of step 8, and also on every early exit below (empty diff, an error, or the user stopping you).
+3. Call ferret_collect_context with target "${target}". If the diff is empty, release the lock, say so, and stop. If it is very large (>15 files), review in directory-grouped batches so no hunk is skipped.
+4. Call ferret_run_analyzers with the same target. Treat analyzer findings as evidence; deduplicate equivalent semantic findings instead of reporting them twice.
+5. Read each changed file's relevant scope (enclosing functions/classes, call sites of changed signatures). Use the FERRET_FILE_HISTORY section to spot regressions of previously fixed bugs.
+6. Analyze every hunk against all five vectors: LOGIC, SECURITY, CONCURRENCY, PERFORMANCE, API. Only report issues caused or exposed by the diff, each with a concrete failure scenario.
+7. Filter noise: drop findings a configured linter already enforces; call ferret_fp_cache with action "check" for each remaining finding and drop suppressed ones (count them); assign severity (CRITICAL/WARNING/SUGGESTION) and confidence (HIGH/MEDIUM/LOW) per the methodology.
+8. Write the findings JSON to .ferret/last-review.json per the output schema, then print the report: findings ordered CRITICAL → WARNING → SUGGESTION with clickable file:line:col locations, one-line message, failure-scenario explanation, and a ready-to-apply unified diff patch when a safe fix exists. Close with the tally including suppressed and deduped counts.
+9. Scrub any credential values from your output as [REDACTED_SECRET] (hardcoded secrets are themselves CRITICAL/SECURITY findings — report location, never value).
+10. Call ferret_review_lock with action "release" and your token. Do this even if the review failed or you stopped early — a lock you never release blocks every other review on this repository until its lease expires.`;
 
 const PRECOMMIT_PROMPT = `Run a fast CodeFerret pre-commit check of the staged changes. Report ONLY commit blockers: findings that are CRITICAL severity AND HIGH confidence, plus secrets. No WARNINGs, no SUGGESTIONs, speed over depth.
 

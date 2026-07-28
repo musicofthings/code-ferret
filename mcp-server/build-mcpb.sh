@@ -3,9 +3,9 @@
 # Desktop (and any other MCPB-compatible host).
 #
 # Vendors the repo's scripts/, skills/, and cli/src into the bundle so the
-# server is self-contained (ferret_doctor/ferret_stats load cli/src at
-# runtime), installs production dependencies, then packs with the official
-# mcpb CLI.
+# server is self-contained (ferret_doctor, ferret_stats, ferret_findings, and
+# ferret_review_lock all load cli/src at runtime), installs production
+# dependencies, then packs with the official mcpb CLI.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
