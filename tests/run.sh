@@ -124,6 +124,5 @@ set -e
 assert_contains "$CONFIGURED_OUTPUT" "commit blocked"
 
 python3 "$ROOT/tests/test_run_tools.py"
-python3 "$ROOT/tests/test_check_models.py"
 
 printf 'CodeFerret shell integration tests passed.\n'

@@ -1,10 +1,14 @@
-# CodeFerret PR review via GitHub Actions (alternative to the webhook Worker).
+# CodeFerret PR review via GitHub Actions — OPTIONAL, and the one CodeFerret
+# path that is not local.
+#
+# CodeFerret otherwise runs entirely on your machine through a coding agent you
+# already have installed: no service, no account, no API key. This workflow is
+# different by nature — it runs on GitHub's runners and sends your diff to a
+# model API under your own key and account. Use it only if you want PR review
+# in CI; nothing else in CodeFerret depends on it.
+#
 # Copy to .github/workflows/code-ferret.yml in the target repository and set
 # the ANTHROPIC_API_KEY repository secret.
-#
-# This example uses claude-code-action. To review with GPT/Codex, Gemini, or
-# Grok instead, deploy the multi-provider webhook Worker (worker/) with the
-# matching API key — see "Model compatibility" in the README.
 name: CodeFerret Review
 
 on:

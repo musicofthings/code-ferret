@@ -45,6 +45,9 @@ tools:
   linters: true
   typecheck: true
   security: true
-  dependencies: true
+  # The only setting here that makes a network request: npm audit sends your
+  # dependency tree to the registry, pip-audit queries the advisory API.
+  # Off by default so a review stays entirely local; turn it on deliberately.
+  dependencies: false
   ci_context: true
   timeout_seconds: 120

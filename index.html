@@ -306,13 +306,13 @@ SECRET src/config.py:1</pre>
     <article class="row reverse" id="ci">
       <div class="media"><figure><img src="assets/codeferret_github_action.png" alt="Ferret conducting an automated factory line turning pull requests into approved green packages" width="1254" height="1254" loading="lazy" decoding="async" /></figure></div>
       <div class="copy">
-        <span class="eyebrow e-lav">Beyond your terminal</span>
-        <h2>The same engine runs in CI and at the edge</h2>
-        <p>Both optional — take review from your laptop to every pull request. A weekly automated check keeps the model registry current and opens an update PR whenever providers ship new models or change their API docs.</p>
+        <span class="eyebrow e-lav">Your machine, your code</span>
+        <h2>Runs entirely on your laptop</h2>
+        <p>No service, no account, no API key. The review is performed by a coding agent you already have installed, so your code never leaves your computer — that is the deliberate difference from hosted reviewers.</p>
         <ul class="feat">
-          <li><strong>GitHub Action</strong> — drop <code>examples/github-workflow.yml</code> in, set <code>ANTHROPIC_API_KEY</code>, get inline PR comments</li>
-          <li><strong>Cloudflare Worker proxy</strong> — reviews with Claude, GPT, Gemini, or Grok (whichever API key you configure), verifies signatures, and scrubs secrets to <code>[REDACTED_SECRET]</code> before anything reaches the LLM</li>
-          <li><strong>Native git hook</strong> — install <code>examples/git-pre-commit-hook</code> for the same guard in plain git</li>
+          <li><strong>Standalone CLI</strong> — <code>ferret review</code> in any terminal, delegating to your installed <code>claude</code>, <code>codex</code>, or <code>gemini</code></li>
+          <li><strong>Native git hook</strong> — install <code>examples/git-pre-commit-hook</code> for a pure-bash secret guard in plain git</li>
+          <li><strong>Optional GitHub Action</strong> — <code>examples/github-workflow.yml</code> for PR reviews in CI; the one path that leaves your machine, under your own API key</li>
         </ul>
       </div>
     </article>

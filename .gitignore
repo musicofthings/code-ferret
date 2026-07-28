@@ -3,6 +3,5 @@ __pycache__/
 .DS_Store
 node_modules/
 .ferret/
-.wrangler/
 dist/
 mcp-server/vendor/

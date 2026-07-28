@@ -25,7 +25,12 @@ DEFAULT_TOOLS = {
     "linters": True,
     "typecheck": True,
     "security": True,
-    "dependencies": True,
+    # OFF by default, unlike every other group here, because it is the only one
+    # that leaves the machine: `npm audit` sends the dependency tree to the
+    # registry and `pip-audit` queries the advisory API. CodeFerret reviews are
+    # local by definition, so a network call is opt-in -- set
+    # `tools.dependencies: true` in .codeferret.yaml to enable it.
+    "dependencies": False,
     "timeout_seconds": 120,
 }
 
