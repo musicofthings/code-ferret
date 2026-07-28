@@ -92,6 +92,36 @@ each provider (docs are checked without keys).
 | `/code-ferret:triage` | Steps through findings one by one: **Accept & apply patch**, **Ignore pattern** (suppresses it in future runs), **Discuss**, or **Skip**. |
 | `/code-ferret:precommit` | Fast staged-only check. Reports only CRITICAL + HIGH-confidence blockers and secrets. First line is `FERRET: PASS` or `FERRET: BLOCK`. |
 
+## CLI
+
+CodeFerret also ships a standalone CLI that runs reviews from any terminal by
+delegating to a coding agent you already have installed (`claude`, `codex`, or
+`gemini`) — no API key and no CodeFerret account.
+
+```bash
+cd cli && npm link      # or: npm install -g ./cli
+ferret doctor           # verify the setup first
+ferret                  # review committed + staged + unstaged changes
+```
+
+| Command | What it does |
+|---|---|
+| `ferret [review]` | Review the current diff; plain-text report |
+| `ferret review --agent` | Structured JSONL for coding agents and automation |
+| `ferret review --light` | Fast policy: no analyzers, `-U10` context, LOGIC + SECURITY only |
+| `ferret review findings` | Replay the last review without re-analyzing |
+| `ferret review --show-prompts` | Print the prompts from the last review |
+| `ferret doctor` | Verify setup and connectivity; exit 1 on failure |
+| `ferret stats [--rebuild]` | Review statistics from `.ferret/history.jsonl` |
+
+Scope flags: `--committed`, `--uncommitted`, `--include-untracked`,
+`--base <branch>`, `--base-commit <sha>`, `--dir <path>`, `-c/--config <file>`.
+Contradictory combinations are rejected before a review starts.
+
+Every `ferret review` spawns a real agent session against your existing
+subscription. Use `--light` for the cheap path, and keep the git pre-commit
+hook on the pure-bash secret scan rather than a full review.
+
 ## What gets reviewed
 
 Only the diff plus its surrounding lexical scope (±50 lines), never the whole
