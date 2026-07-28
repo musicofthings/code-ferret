@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { join, relative, resolve, isAbsolute, sep } from "node:path";
 import { repoRoot, ferretDir, scriptPath } from "./paths.js";
 import { resolveScope } from "./scope.js";
 import { detectAgent, runAgent } from "./agent.js";
@@ -44,19 +44,44 @@ async function gitFiles(cwd, args) {
   }
 }
 
-/** Files in scope, used for the empty-diff check and candidate computation. */
-async function scopeFiles(cwd, scope) {
+/**
+ * Files in scope, used for the empty-diff check and candidate computation.
+ * `pathspec`, when set, narrows every git call to that subtree (see the
+ * `--dir` handling in runReview) -- without it, `--dir` only changed which
+ * directory git ran from, not what it reported, since repoRoot() always
+ * resolves back to the toplevel.
+ */
+async function scopeFiles(cwd, scope, pathspec) {
+  const spec = pathspec ? ["--", pathspec] : [];
   if (scope.target === "uncommitted") {
-    const tracked = await gitFiles(cwd, ["diff", "HEAD", "--name-only"]);
+    const tracked = await gitFiles(cwd, ["diff", "HEAD", "--name-only", ...spec]);
     if (!scope.includeUntracked) return tracked;
-    return [...tracked, ...(await gitFiles(cwd, ["ls-files", "--others", "--exclude-standard"]))];
+    return [
+      ...tracked,
+      ...(await gitFiles(cwd, ["ls-files", "--others", "--exclude-standard", ...spec])),
+    ];
   }
   if (scope.target === "all") {
-    const changed = await gitFiles(cwd, ["diff", scope.baseRef, "--name-only"]);
+    const changed = await gitFiles(cwd, ["diff", scope.baseRef, "--name-only", ...spec]);
     if (!scope.includeUntracked) return changed;
-    return [...changed, ...(await gitFiles(cwd, ["ls-files", "--others", "--exclude-standard"]))];
+    return [
+      ...changed,
+      ...(await gitFiles(cwd, ["ls-files", "--others", "--exclude-standard", ...spec])),
+    ];
   }
-  return gitFiles(cwd, ["diff", `${scope.target}...HEAD`, "--name-only"]);
+  return gitFiles(cwd, ["diff", `${scope.target}...HEAD`, "--name-only", ...spec]);
+}
+
+/**
+ * The directory requested via `--dir`, expressed as a git pathspec relative
+ * to the repo root, or null when it IS the repo root (no narrowing needed).
+ * Guards against a cross-drive `relative()` result on Windows, which would
+ * come back as an absolute path rather than a real subtree.
+ */
+function scopePathspec(root, cwd) {
+  const rel = relative(root, resolve(cwd));
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+  return rel.split(sep).join("/");
 }
 
 function buildPrompt({ target, light, configFiles }) {
@@ -112,7 +137,8 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     branch = out.trim();
   } catch { /* unborn branch */ }
 
-  const files = await scopeFiles(root, scope);
+  const pathspec = scopePathspec(root, cwd);
+  const files = await scopeFiles(root, scope, pathspec);
 
   // detectAgent throws when FERRET_AGENT_CMD/FERRET_AGENT is set but cannot be
   // spawned (see agent.js) -- that is a deliberate, actionable error for a
@@ -141,7 +167,13 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     return 0;
   }
 
-  const maxFiles = Number(env.FERRET_MAX_FILES ?? DEFAULT_MAX_FILES);
+  // Number(...) turns junk into NaN, and `files.length > NaN` is always
+  // false -- that would silently disable the oversized-diff budget guard
+  // instead of falling back to the documented default. parseInt + an
+  // explicit sanity check ensures garbage (or "") always falls back, never
+  // disables the check.
+  const rawMaxFiles = Number.parseInt(env.FERRET_MAX_FILES ?? "", 10);
+  const maxFiles = Number.isInteger(rawMaxFiles) && rawMaxFiles > 0 ? rawMaxFiles : DEFAULT_MAX_FILES;
   if (files.length > maxFiles) {
     const { candidates, candidatesNote } = computeCandidates({
       files,
@@ -178,6 +210,15 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     light: Boolean(flags.light),
     configFiles: flags.config ?? [],
   });
+
+  // A stale last-review.json from a previous run must not survive into this
+  // one: without this, an agent that fails outright (non-zero exit, wrote
+  // nothing) or times out leaves the old file in place, `readReview` happily
+  // returns it, `!review` is false, and both failure branches below become
+  // unreachable -- the CLI reports the previous run's findings as fresh,
+  // appends them to permanent history, and exits 0.
+  await rm(join(dir, "last-review.json"), { force: true });
+  await rm(join(dir, "last-prompts.json"), { force: true });
 
   const started = Date.now();
   const beat = setInterval(() => emitter.heartbeat(), HEARTBEAT_MS);
@@ -225,11 +266,22 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
   }
 
   await mkdir(dir, { recursive: true });
+  // Severity/vector strings come straight from LLM-authored JSON, so treat
+  // them as untrusted: normalize case (agent.js's own wire mapping already
+  // uppercases, so a lowercase "critical" must still count), and gate the
+  // increment on Object.hasOwn against a known key set rather than an
+  // `!== undefined` check, which is both case-sensitive and reachable via
+  // Object.prototype (a finding with severity: "constructor" would otherwise
+  // write a corrupted own "constructor" property that stats.js's aggregate()
+  // then string-concatenates into findings_total -- permanent, unrecoverable
+  // stats corruption from a single bad line).
   const bySeverity = { CRITICAL: 0, WARNING: 0, SUGGESTION: 0 };
-  const byVector = {};
+  const byVector = Object.create(null);
   for (const f of findings) {
-    if (bySeverity[f.severity] !== undefined) bySeverity[f.severity] += 1;
-    if (f.vector) byVector[f.vector] = (byVector[f.vector] ?? 0) + 1;
+    const sev = String(f.severity ?? "").toUpperCase();
+    if (Object.hasOwn(bySeverity, sev)) bySeverity[sev] += 1;
+    const vec = f.vector ? String(f.vector).toUpperCase() : null;
+    if (vec) byVector[vec] = (byVector[vec] ?? 0) + 1;
   }
   await appendHistory(dir, {
     ts: new Date().toISOString(),

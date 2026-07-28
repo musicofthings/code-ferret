@@ -5,6 +5,7 @@ import { runDoctor, formatDoctor } from "./doctor.js";
 import { readStats, formatStats } from "./stats.js";
 import { readReview, readPrompts, sortFindings } from "./findings.js";
 import { formatReport } from "./report.js";
+import { createEmitter } from "./events.js";
 import { ferretDir } from "./paths.js";
 
 export const HELP = `ferret — CodeFerret CLI
@@ -116,7 +117,12 @@ export async function main(argv, io = {}) {
 
   const dir = ferretDir(workdir);
   if (!dir) {
-    stderr.write("error: not inside a git repository\n");
+    // Same contract as the other review-time failures below: a --agent
+    // consumer must get a parseable error event on stdout, not a silently
+    // empty JSONL stream plus a bare exit 1.
+    const message = "not inside a git repository";
+    if (values.agent) createEmitter({ agent: true, stdout }).error({ message });
+    else stderr.write(`error: ${message}\n`);
     return 1;
   }
 
@@ -160,11 +166,16 @@ export async function main(argv, io = {}) {
   try {
     return await runReview({ flags, stdout, stderr, env: agentEnv, cwd: workdir });
   } catch (err) {
+    // Scope validation (resolveScope, called from runReview) throws before
+    // any agent is spawned. That must still reach a --agent consumer as a
+    // parseable error event, not silent stdout plus a bare exit 1.
     if (err instanceof ScopeError) {
-      stderr.write(`error: ${err.message}\n`);
+      if (values.agent) createEmitter({ agent: true, stdout }).error({ message: err.message });
+      else stderr.write(`error: ${err.message}\n`);
       return 1;
     }
-    stderr.write(`error: ${err.message}\n`);
+    if (values.agent) createEmitter({ agent: true, stdout }).error({ message: err.message });
+    else stderr.write(`error: ${err.message}\n`);
     return 1;
   }
 }
