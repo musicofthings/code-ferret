@@ -99,7 +99,7 @@ delegating to a coding agent you already have installed (`claude`, `codex`, or
 `gemini`) — no API key and no CodeFerret account.
 
 ```bash
-cd cli && npm link      # or: npm install -g ./cli
+cd cli && npm link      # or, from the repo root: npm install -g ./cli
 ferret doctor           # verify the setup first
 ferret                  # review committed + staged + unstaged changes
 ```

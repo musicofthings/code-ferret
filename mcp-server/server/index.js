@@ -77,6 +77,13 @@ const repoPathArg = z
   .optional()
   .describe("Absolute path to the git repository to review (defaults to the server's working directory)");
 const targetArg = z
+  .enum(["staged", "head"])
+  .or(z.string())
+  .optional()
+  .describe("Diff target: 'staged' (index only), 'head' (working tree vs HEAD, default), or a base ref like 'main'");
+// collect-context.sh alone understands 'all' and 'uncommitted' (run_tools.py and
+// scan-secrets.sh do not), so only ferret_collect_context gets the wider enum.
+const collectTargetArg = z
   .enum(["staged", "head", "all", "uncommitted"])
   .or(z.string())
   .optional()
@@ -94,7 +101,7 @@ server.registerTool(
     title: "Collect review context",
     description:
       "Emit the scoped diff (±50 lines of lexical context), changed-file list, per-file git history, touched dependency manifests, FERRET_CONFIG (.codeferret.yaml), and repository guidelines for the requested diff target. Run this first for any CodeFerret review.",
-    inputSchema: { repo_path: repoPathArg, target: targetArg },
+    inputSchema: { repo_path: repoPathArg, target: collectTargetArg },
   },
   async ({ repo_path, target }) => {
     const cwd = repo_path || process.cwd();
@@ -211,9 +218,13 @@ server.registerTool(
     inputSchema: { repo_path: repoPathArg },
   },
   async ({ repo_path }) => {
-    const { runDoctor, formatDoctor } = await cliModule("doctor.js");
-    const result = await runDoctor({ cwd: repo_path || process.cwd() });
-    return textResult(formatDoctor(result), result.exitCode !== 0);
+    try {
+      const { runDoctor, formatDoctor } = await cliModule("doctor.js");
+      const result = await runDoctor({ cwd: repo_path || process.cwd() });
+      return textResult(formatDoctor(result), result.exitCode !== 0);
+    } catch (err) {
+      return textResult(`Could not load the CodeFerret CLI: ${err.message}`, true);
+    }
   },
 );
 
@@ -230,8 +241,12 @@ server.registerTool(
   },
   async ({ repo_path, rebuild }) => {
     const cwd = repo_path || process.cwd();
-    const { readStats, formatStats } = await cliModule("stats.js");
-    return textResult(formatStats(await readStats(join(cwd, ".ferret"), { rebuild: Boolean(rebuild) })));
+    try {
+      const { readStats, formatStats } = await cliModule("stats.js");
+      return textResult(formatStats(await readStats(join(cwd, ".ferret"), { rebuild: Boolean(rebuild) })));
+    } catch (err) {
+      return textResult(`Could not load the CodeFerret CLI: ${err.message}`, true);
+    }
   },
 );
 
