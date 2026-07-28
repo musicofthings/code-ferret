@@ -56,6 +56,18 @@ test("missing optional analyzers warn but never fail the run", async () => {
   assert.equal(result.exitCode, 0);
 });
 
+test("a FERRET_AGENT_CMD override that fails isInstalled surfaces its actionable message, not a crash", async () => {
+  const result = await runDoctor({
+    cwd: makeRepo(),
+    env: { FERRET_AGENT_CMD: "bad-agent" },
+    isInstalled: (cmd) => cmd !== "bad-agent",
+  });
+  assert.equal(find(result, "host agent").status, "fail");
+  assert.match(find(result, "host agent").detail, /FERRET_AGENT_CMD/);
+  assert.match(find(result, "host agent").detail, /bad-agent/);
+  assert.equal(result.exitCode, 1);
+});
+
 test("every documented check is reported", async () => {
   const result = await runDoctor({
     cwd: makeRepo(),
