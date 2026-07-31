@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { join, relative, resolve, isAbsolute, sep } from "node:path";
@@ -121,13 +122,30 @@ async function scopeFiles(cwd, scope, pathspec) {
 }
 
 /**
+ * Resolve symlinks (and macOS /var → /private/var) so relative() against
+ * git's --show-toplevel result does not spuriously climb out of the tree.
+ */
+function realPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
  * The directory requested via `--dir`, expressed as a git pathspec relative
  * to the repo root, or null when it IS the repo root (no narrowing needed).
  * Guards against a cross-drive `relative()` result on Windows, which would
  * come back as an absolute path rather than a real subtree.
+ *
+ * Both sides are realpath'd: on macOS, `git rev-parse --show-toplevel` returns
+ * `/private/var/...` while Node temp paths are often `/var/...` (a symlink).
+ * Without normalizing, relative() climbs out with `../..` and --dir is
+ * silently dropped — the whole-repo file count is used instead.
  */
 function scopePathspec(root, cwd) {
-  const rel = relative(root, resolve(cwd));
+  const rel = relative(realPath(root), realPath(cwd));
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
   return rel.split(sep).join("/");
 }

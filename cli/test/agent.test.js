@@ -287,6 +287,9 @@ test("runAgent distinguishes a timeout from other failures and still resolves", 
   assert.equal(result.timedOut, true);
   assert.match(result.stderr, /timed out/i);
   assert.match(result.stderr, /300/);
-  // Resolved well before the 5s SIGKILL grace period would have to fire.
-  assert.ok(elapsed < 4000, `expected to resolve quickly, took ${elapsed}ms`);
+  // On POSIX, sleepy-agent ignores SIGTERM so resolution waits for the 5s
+  // SIGKILL grace timer (~5.3s total). On Windows, SIGTERM already terminates
+  // the child and this finishes near the 300ms timeout. Bound the upper end
+  // to timeout + grace + slack so a hang still fails the test.
+  assert.ok(elapsed < 8000, `expected to resolve via SIGKILL grace, took ${elapsed}ms`);
 });

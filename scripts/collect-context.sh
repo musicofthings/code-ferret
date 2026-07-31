@@ -106,7 +106,8 @@ fi
 
 echo "=== FERRET_CHANGED_FILES ==="
 git diff "${DIFF_ARGS[@]}" --name-status -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}"
-for file in "${UNTRACKED[@]}"; do
+# Bash 3.2 + set -u treats an empty "${ARR[@]}" as unbound; the + form is safe.
+for file in ${UNTRACKED[@]+"${UNTRACKED[@]}"}; do
   printf 'A\t%s\n' "$file"
 done
 
@@ -114,7 +115,7 @@ echo "=== FERRET_DEPENDENCY_MANIFESTS ==="
 git diff "${DIFF_ARGS[@]}" --name-only -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}" \
   | grep -E '(^|/)(package\.json|package-lock\.json|requirements.*\.txt|pyproject\.toml|go\.(mod|sum)|Cargo\.(toml|lock)|Gemfile|pom\.xml|build\.gradle.*)$' \
   || true
-for file in "${UNTRACKED[@]}"; do
+for file in ${UNTRACKED[@]+"${UNTRACKED[@]}"}; do
   if [[ "$file" =~ (^|/)(package\.json|package-lock\.json|requirements.*\.txt|pyproject\.toml|go\.(mod|sum)|Cargo\.(toml|lock)|Gemfile|pom\.xml|build\.gradle.*)$ ]]; then
     printf '%s\n' "$file"
   fi
@@ -133,7 +134,7 @@ fi
 
 echo "=== FERRET_DIFF ==="
 git diff "${DIFF_ARGS[@]}" -U"$CONTEXT_LINES" --no-color -- "$DIR_PATHSPEC" "${EXCLUDES[@]+"${EXCLUDES[@]}"}"
-for file in "${UNTRACKED[@]}"; do
+for file in ${UNTRACKED[@]+"${UNTRACKED[@]}"}; do
   git diff --no-index -U"$CONTEXT_LINES" --no-color -- /dev/null "$file" || status=$?
   if [[ "${status:-0}" -gt 1 ]]; then
     echo "error: failed to diff untracked file: $file" >&2
