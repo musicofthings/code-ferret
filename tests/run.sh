@@ -181,6 +181,65 @@ PLAN_BAD_STATUS=$?
 set -e
 [[ "$PLAN_BAD_STATUS" -eq 2 ]] || fail "plan-shards.sh must reject a non-positive shard count"
 
+# --- secret scanner coverage -------------------------------------------------
+# The generic keyword pattern used to anchor the keyword immediately before the
+# "=", so it caught DB_PASSWORD (PASSWORD ends the name) but missed
+# AWS_SECRET_ACCESS_KEY and STRIPE_SECRET_KEY -- the canonical names for two of
+# the most widely used credentials. Every shape below must stay caught.
+scan_staged() { # file-content -> echoes CAUGHT or MISSED
+  printf '%s\n' "$1" > "$REPO/cred_probe.txt"
+  git -C "$REPO" add cred_probe.txt
+  # scan-secrets.sh exits 1 when it FINDS something, so capture its output
+  # before testing it: piping it straight into grep makes pipefail report the
+  # detection as a pipeline failure and inverts the result.
+  local out
+  set +e
+  out="$(cd "$REPO" && bash "$ROOT/scripts/scan-secrets.sh" staged 2>&1)"
+  set -e
+  case "$out" in
+    *SECRETS_DETECTED*) echo CAUGHT ;;
+    *)                  echo MISSED ;;
+  esac
+}
+must_catch() {
+  [[ "$(scan_staged "$1")" == CAUGHT ]] || fail "secret scanner must catch: $2"
+}
+must_ignore() {
+  [[ "$(scan_staged "$1")" == MISSED ]] || fail "secret scanner must not flag: $2"
+}
+
+# Provider-format fixtures are assembled from fragments at run time. Written as
+# whole literals they are indistinguishable from live credentials to upstream
+# scanners -- GitHub push protection rejected this very file over the Stripe
+# one -- while the scanner under test still sees the fully-formed line.
+FILLER="abcdefghijklmnopqrstuvwx"
+AWS_SEC="wJalrXUtnFEMI/K7MDENG/bPxRfi""CYEXAMPLE""KEY"
+AWS_ID="AKIA""IOSFODNN7""EXAMPLE"
+STRIPE="sk_""live_""$FILLER"
+GITHUB="ghp_""$FILLER""0123456789ab"
+ANTHROPIC="sk-""ant-""api03-""$FILLER"
+GOOGLE="AIza""SyA1234567890""$FILLER""zab"
+LONGPW="sup3rs3cretp4ssw0rd12345"
+
+must_catch "AWS_SECRET_ACCESS_KEY = \"$AWS_SEC\"" "AWS_SECRET_ACCESS_KEY"
+must_catch "STRIPE_SECRET_KEY = \"$STRIPE\""      "STRIPE_SECRET_KEY"
+must_catch "DB_PASSWORD = \"$LONGPW\""            "DB_PASSWORD"
+must_catch "password = \"$LONGPW\""               "bare password"
+must_catch "secret = \"$FILLER$FILLER\""          "bare secret"
+must_catch 'api_key = "abcdef1234567890abcdef1234567890"' "api_key"
+must_catch "aws_id = \"$AWS_ID\""                 "AWS access key id"
+must_catch "tok = \"$GITHUB\""                    "GitHub token"
+must_catch "k = \"$ANTHROPIC\""                   "Anthropic key"
+must_catch "g = \"$GOOGLE\""                      "Google API key"
+must_catch '-----BEGIN RSA PRIVATE KEY-----'      "RSA private key"
+
+must_ignore 'api_key = os.environ["MY_API_KEY_NAME_HERE_LONG"]'                 "env var reference"
+must_ignore 'secret = "abc"'                                                    "short value"
+must_ignore '# set SECRET_ACCESS_KEY in your environment before running'        "prose comment"
+
+git -C "$REPO" rm -q --cached cred_probe.txt
+rm -f "$REPO/cred_probe.txt"
+
 set +e
 INVALID_CONTEXT="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" missing-ref 2>&1)"
 INVALID_CONTEXT_STATUS=$?

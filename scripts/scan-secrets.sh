@@ -28,7 +28,13 @@ PATTERNS=(
   'xox[pborsa]-[0-9]{10,13}-[0-9]{10,13}-[0-9A-Za-z-]{10,}'
   'AIza[0-9A-Za-z_-]{35}'
   '-----BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----'
-  '(api[_-]?key|apikey|secret|token|password|passwd)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
+  # The keyword may sit anywhere inside the identifier, not just at its end.
+  # Without the surrounding [A-Za-z0-9_]* this misses the canonical names for
+  # two of the most widely used credentials -- AWS_SECRET_ACCESS_KEY and
+  # STRIPE_SECRET_KEY -- because "SECRET" is followed by more identifier
+  # characters before the "=". DB_PASSWORD was caught only because PASSWORD
+  # happened to end the name.
+  '[A-Za-z0-9_]*(api[_-]?key|apikey|secret|token|password|passwd)[A-Za-z0-9_]*["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=.-]{20,}["'"'"']'
 )
 REGEX="$(IFS='|'; echo "${PATTERNS[*]}")"
 

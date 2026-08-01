@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.1 — Secret scanner missed mid-identifier keywords
+
+### Fixed
+
+- **The pre-commit secret guard did not block `AWS_SECRET_ACCESS_KEY` or
+  `STRIPE_SECRET_KEY`.** The generic keyword pattern anchored the keyword
+  immediately before the `=`, so it matched `DB_PASSWORD = "..."` (where
+  `PASSWORD` ends the identifier) but not `AWS_SECRET_ACCESS_KEY = "..."`,
+  where `SECRET` is followed by `_ACCESS_KEY`. Those are the canonical
+  environment-variable names for two of the most widely used credentials, so
+  the most likely real-world spelling was the one that slipped through. The
+  pattern now allows identifier characters on both sides of the keyword.
+
+  Found while running the pre-commit path against a scratch repository with a
+  staged AWS key; the commit was not blocked. Present since 0.2.0.
+
+### Testing
+
+- 14 new assertions pin the scanner's behaviour: 11 credential shapes that must
+  be caught (AWS secret key and access-key id, Stripe, GitHub, Anthropic,
+  Google, RSA private key, and bare `password`/`secret`/`api_key`/`DB_PASSWORD`)
+  and 3 benign lines that must not be flagged (environment-variable reference,
+  short value, prose comment). Verified to fail when the fix is reverted.
+
 ## 0.3.0 — Review cost and context fidelity
 
 This release cuts the token cost of a review by roughly an order of magnitude
