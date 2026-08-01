@@ -222,7 +222,7 @@ review is cheap without losing the context needed to trace a failure.
 | `FERRET_FUNCTION_CONTEXT` | `1` (`0` in light mode) | Show each hunk's complete enclosing function via `git -W`. `0` falls back to a fixed line count. |
 | `FERRET_CONTEXT_LINES` | `12` (`6` light) | Fixed context lines when function context is off. |
 | `FERRET_OUT` | unset | Write the payload to this path and print only a compact index of section line ranges. Keeps a large diff out of the agent's transcript. |
-| `FERRET_FILES` | unset | Colon- or newline-separated file subset. Shards a diff across parallel reviewers. |
+| `FERRET_FILES` | unset | Colon- or newline-separated file subset. Scopes a batch when working a large diff in sequence. |
 | `FERRET_SKIP_GUIDELINES` | `0` | Omit `AGENTS.md`/`CLAUDE.md`/`.cursorrules` bodies when the host agent already has them. |
 | `FERRET_INCLUDE_LOCKFILES` | `0` | Include lockfile hunks in the diff. |
 | `FERRET_LIGHT` | `0` | Speed over depth: fixed `-U6`, no per-file history. |
@@ -316,7 +316,6 @@ code-ferret/
 ├── gemini-extension.json           # Gemini CLI extension manifest (+ GEMINI.md)
 ├── commands/                       # /code-ferret:* (Claude Code .md) + ferret/*.toml (Gemini CLI)
 ├── skills/code-ferret/             # review methodology + vector checklists + schema
-├── agents/ferret-reviewer.md       # per-vector subagent for parallel review of big diffs
 ├── hooks/hooks.json                # PreToolUse git-commit secret guard
 ├── scripts/                        # collectors, shard planner, analyzers, fp cache
 ├── cli/                            # standalone `ferret` CLI (delegates to your agent)

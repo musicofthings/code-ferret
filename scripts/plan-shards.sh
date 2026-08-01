@@ -120,4 +120,22 @@ for weight, path in files:
 
 for total, paths in bins:
     print(":".join(paths))
+
+# A batch cannot be split below one file, so a single dominant file sets the
+# floor no matter how many batches are requested. Say so on stderr rather than
+# emitting a lopsided plan that looks balanced.
+grand = sum(w for w, _ in files)
+heaviest, heaviest_path = max(files)
+biggest_bin = max(b[0] for b in bins)
+if grand and biggest_bin > grand / len(bins) * 1.5:
+    pct = 100 * biggest_bin / grand
+    if heaviest > grand / len(bins):
+        print(f"note: {heaviest_path} alone is {100 * heaviest / grand:.0f}% of the diff; "
+              f"the largest batch is {pct:.0f}% and cannot be split further. "
+              f"Review that file on its own, or exclude it via .ferretignore.",
+              file=sys.stderr)
+    else:
+        print(f"note: the largest batch is {pct:.0f}% of the diff; "
+              f"batches are uneven because few files carry most of the change.",
+              file=sys.stderr)
 '

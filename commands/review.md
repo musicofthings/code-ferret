@@ -41,29 +41,25 @@ Steps:
    (skill references/detection-vectors.md): LOGIC, SECURITY, CONCURRENCY,
    PERFORMANCE, API.
 
-   For a large diff (>15 files), fan out to `ferret-reviewer` subagents — one
-   per **file shard**, in a single parallel batch. Get the shards from:
+   **Do this yourself. Never dispatch subagents for a review.** Every agent
+   starts cold, re-derives context you already hold, and re-reads shared files,
+   so a parallel review costs multiples of a sequential one for the same
+   findings. There is no diff size at which spawning reviewers is the right
+   call.
+
+   For a large diff, work through it in **sequential batches** within this
+   context rather than all at once:
 
    ```
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/plan-shards.sh <target> 5
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/plan-shards.sh <target> <n>
    ```
 
-   It prints one colon-joined file list per line, balanced by diff size, so no
-   agent gets stuck with most of the diff. Give each agent one line plus the
-   `.ferret/context.txt` path. Agents must NOT re-run the collector: collecting
-   once and sharding is what keeps a fan-out review from costing N× the diff.
+   It prints one colon-joined file list per line, balanced by diff size. Read
+   each batch's slice of `.ferret/context.txt` in turn, note its findings, then
+   move to the next. Same coverage, one context, no duplicated setup.
 
-   **Shard by file, never by vector.** Every agent applies all five vectors to
-   its own files. One-agent-per-vector looks equivalent and is not: it shows
-   each vector only its own shard, so the review covers a fifth of the
-   file×vector matrix and a defect whose vector was assigned to a different
-   shard is never looked for. Measured on a 23-file diff with 12 planted bugs,
-   per-vector sharding recalled 6/12 — one agent explicitly identified a race
-   condition and dropped it as "another vector's job" when no other agent would
-   ever see that file.
-
-   Otherwise review inline; do not spawn agents for a small diff, where the
-   fan-out overhead exceeds the work.
+   A small diff needs no batching at all — read the whole `FERRET_DIFF` range
+   and review it in one pass.
 
 5. Filter noise:
    - Drop findings a configured linter already enforces.

@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.4.0 — One reviewer, one context
+
+### Removed
+
+- **`agents/ferret-reviewer.md` is gone, and no command dispatches subagents.**
+  Parallel review was a mistake twice over: 0.3.0 had every agent re-collect the
+  whole diff, and 0.3.0–0.3.1 sharded by vector so the review covered a fifth of
+  the file×vector matrix. Both were fixed, and the feature still was not worth
+  it. Each agent starts cold, re-derives context the reviewer already holds, and
+  re-reads the same shared files — a multiple of the cost for the same findings.
+
+  Large diffs are now worked through in **sequential batches inside one
+  context**. `plan-shards.sh` survives to produce those batches; it just feeds a
+  loop instead of a fleet.
+
+  This is why the plugin no longer ships an `agents/` directory at all: a
+  present agent definition is a standing invitation to dispatch it.
+
+### Fixed
+
+- **The pre-commit guard blocked commits over placeholder values.** Sample data
+  in `.env.example` files and docs (`password = "your-password-here"`) tripped
+  the broad keyword rule. Blocking a commit over a non-secret teaches people to
+  bypass the hook, which costs more than it saves.
+
+  The filter applies **only** to the keyword rule, never to structurally
+  unambiguous credentials, and requires the value to be both worded like a
+  placeholder and missing a real credential's character mix. AWS's documented
+  sample secret key contains the word `EXAMPLE`; it is still reported.
+
+- **`plan-shards.sh` hid batch imbalance it could not fix.** A batch cannot be
+  split below one file, so one dominant file caps how even a plan can get. That
+  now prints a note to stderr naming the file, instead of shipping a lopsided
+  plan that looks balanced. Balanced plans stay silent.
+
+### Added
+
+- **`evals/`** — a recall eval with planted ground truth, and `score.py` to
+  grade a review against it. `tests/run.sh` checks that the machinery works;
+  this checks that the review finds things. They fail independently, and the
+  second is what catches design mistakes: the 0.3.0 fan-out passed every unit
+  assertion while recalling 6 of 12 planted bugs.
+- **`fp_cache.py` test coverage**, which was zero despite the suppression round
+  trip being a headline feature. 16 assertions: the hash must survive line
+  numbers, whitespace, case and directory moves, and must not collide across
+  file, vector or message; a corrupt cache must degrade to "not suppressed"
+  rather than take the review down.
+- **triage mechanics coverage**, also previously zero, on the only command that
+  writes to the working tree: patches round-trip out of `last-review.json` and
+  apply, re-applying fails rather than double-patching, a drifted patch reports
+  as inapplicable, and the Ignore-pattern path suppresses on re-run.
+- Assertions that keep the fan-out from returning: `agents/` must not exist, and
+  no command or skill may instruct a dispatch.
+
+### Note on the token work in 0.3.x
+
+Reviewing the transcripts that motivated it: across 120 sessions, 15 actually
+invoked CodeFerret, and the collector payload attributable to it is ~0.26% of
+the tokens in those sessions. The 0.3.x reductions are real and the correctness
+fixes stand on their own, but CodeFerret was not the source of the token spend
+it was optimised for.
+
 ## 0.3.2 — Fan-out reviewed a fifth of what it claimed
 
 ### Fixed

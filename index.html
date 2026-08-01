@@ -160,7 +160,7 @@
       <h1>Reviews your diff.<br/>Proves every bug.</h1>
       <p class="lead">CodeFerret is an autonomous code-review and bug-hunting plugin — for Claude Code, and via MCP for Claude Desktop, OpenAI Codex, Gemini CLI, and any other MCP client. It reviews the changes you actually made — not your whole repo — and only reports issues it can back with a concrete failure scenario.</p>
       <div class="badges">
-        <span class="badge">v0.3.2</span>
+        <span class="badge">v0.4.0</span>
         <span class="badge green">✓ All local tests passing</span>
         <span class="badge">Claude · GPT · Gemini · Grok</span>
       </div>
@@ -273,20 +273,20 @@
 
   <section class="band tint" id="whats-new">
     <div class="wrap narrow">
-      <span class="eyebrow e-mint" style="display:flex;width:max-content;margin:0 auto 1rem;">v0.3.2</span>
+      <span class="eyebrow e-mint" style="display:flex;width:max-content;margin:0 auto 1rem;">v0.4.0</span>
       <h2>Same review, a twelfth of the tokens</h2>
-      <p class="lede">A five-vector fan-out used to collect the same diff six times — once for the orchestrator and once inside every vector agent. It now collects once and shards the work. Measured on a 33-file diff.</p>
+      <p class="lede">Reviews used to re-collect the same diff for every parallel reviewer, and show each one only a slice of the vectors. Parallel reviewers are gone: one reviewer, one context, the diff collected once. Measured on a 33-file diff.</p>
       <div class="stats">
         <div class="stat"><b>12&times;</b><span>fewer tokens per review</span><em>~480k &rarr; ~40k</em></div>
         <div class="stat"><b>231&times;</b><span>smaller orchestrator output</span><em>250&nbsp;KB &rarr; 1&nbsp;KB</em></div>
         <div class="stat"><b>3.7&times;</b><span>lighter slowest agent</span><em>size-balanced shards</em></div>
         <div class="stat"><b>100%</b><span>enclosing-function context</span><em>up from 17.8%</em></div>
-        <div class="stat"><b>12/12</b><span>planted bugs found by the fan-out</span><em>up from 6/12</em></div>
+        <div class="stat"><b>12/12</b><span>planted bugs found</span><em>scored against ground truth</em></div>
       </div>
       <ul class="proof">
         <li><span class="tick">✓</span><div><strong>Complete functions, not fixed windows</strong>Hunks now arrive with their entire enclosing function via <code>git -W</code>. The old fixed <code>-U50</code> window showed just 17.8% of a 617-line function — too little to trace a failure through it. A correctness fix that no token metric would have caught.</div></li>
-        <li><span class="tick">✓</span><div><strong>Collect once, then shard</strong>Agents share one collected context file and a balanced slice of the diff instead of each re-collecting the whole thing. <code>plan-shards.sh</code> packs by diff size, cutting the fattest shard from 148&nbsp;KB to 39&nbsp;KB. Verified live: a logging shim recorded zero collector re-runs across ten agent dispatches.</div></li>
-        <li><span class="tick">✓</span><div><strong>Shards split by file, not by vector</strong>Every agent applies all five vectors to its own files. Splitting per vector covers only a fifth of the file&times;vector matrix — on a 23-file diff with 12 planted bugs it recalled 6/12, versus 12/12 for file shards, at the same token cost.</div></li>
+        <li><span class="tick">✓</span><div><strong>Collect once, reuse everywhere</strong>The diff is collected a single time and every batch reads the same file. <code>plan-shards.sh</code> packs batches by diff size, so no batch carries most of the work.</div></li>
+        <li><span class="tick">✓</span><div><strong>One reviewer, not a swarm</strong>Parallel reviewers were removed: each starts cold and re-derives context the reviewer already holds, costing a multiple of a sequential pass for the same findings. Large diffs are batched in sequence instead.</div></li>
         <li><span class="tick">✓</span><div><strong>Lockfiles by name, not by body</strong>Twelve lockfile formats keep their entry in the changed-file and dependency lists, but their thousands of generated lines stay out of the diff. Version-bump analysis is unaffected.</div></li>
         <li><span class="tick">✓</span><div><strong>Pre-commit is finally light</strong><code>/code-ferret:precommit</code> advertised speed over depth but collected at full depth with complete file history. It now runs one light inline pass and never fans out.</div></li>
         <li><span class="tick">✓</span><div><strong>Verified, not assumed</strong>12 new shell assertions plus a 144-check coverage eval across 5 repositories confirm no changed file is lost between git, the shard plan, and the collected context.</div></li>
@@ -294,16 +294,17 @@
     </div>
   </section>
 
-  <!-- ROW 4: reviewer agent (image right) -->
+  <!-- ROW 4: one reviewer, one context (image right) -->
   <section class="wrap">
     <article class="row reverse">
-      <div class="media"><figure><img src="assets/codeferret_reviewer_agent.png" alt="A squad of specialist ferrets reviewing one large diff in parallel while a lead compiles the report" width="1254" height="1254" loading="lazy" decoding="async" /></figure></div>
+      <div class="media"><figure><img src="assets/codeferret_reviewer_agent.png" alt="A single ferret working steadily through one large diff and compiling the report itself" width="1254" height="1254" loading="lazy" decoding="async" /></figure></div>
       <div class="copy">
-        <span class="eyebrow e-mint">agents/ferret-reviewer</span>
-        <h2>A dedicated reviewer sub-agent</h2>
-        <p>A large diff is split into balanced <strong>file</strong> shards and reviewed in parallel by <code>ferret-reviewer</code> agents. Each agent applies all five vectors to its own files, so every changed line is checked against every vector — never a fifth of the matrix.</p>
+        <span class="eyebrow e-mint">one reviewer, one context</span>
+        <h2>No agent swarm. On purpose.</h2>
+        <p>A large diff is split into balanced batches and worked through in sequence, inside a single context. Every batch is checked against all five vectors, so coverage is complete — without a fleet of agents each starting cold, re-deriving what the reviewer already knows, and re-reading the same shared files.</p>
         <ul class="feat">
           <li>Security, correctness, concurrency and performance evaluated together</li>
+          <li>Diff collected once and reused across every batch</li>
           <li>Findings consolidated into one structured report</li>
           <li>Deterministic output schema for downstream tooling</li>
         </ul>
@@ -402,7 +403,7 @@ SECRET src/config.py:1</pre>
 <footer>
   <div class="wrap foot-inner">
     <div class="foot-brand"><img src="assets/codeferret_mascot_coding.png" alt="CodeFerret mascot" width="1024" height="1024" loading="lazy" decoding="async" />CodeFerret</div>
-    <div>CodeFerret v0.3.2 · MIT-style open source · <a href="https://github.com/musicofthings/code-ferret">github.com/musicofthings/code-ferret</a> · Works with Claude, GPT/Codex, Gemini &amp; Grok</div>
+    <div>CodeFerret v0.4.0 · MIT-style open source · <a href="https://github.com/musicofthings/code-ferret">github.com/musicofthings/code-ferret</a> · Works with Claude, GPT/Codex, Gemini &amp; Grok</div>
   </div>
 </footer>
 

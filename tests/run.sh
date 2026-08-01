@@ -237,6 +237,20 @@ must_ignore 'api_key = os.environ["MY_API_KEY_NAME_HERE_LONG"]'                 
 must_ignore 'secret = "abc"'                                                    "short value"
 must_ignore '# set SECRET_ACCESS_KEY in your environment before running'        "prose comment"
 
+# Placeholders in .env.example files and docs are not secrets. Blocking a commit
+# over one teaches people to bypass the hook, which costs more than it saves.
+# The filter applies ONLY to the broad keyword rule, and only when the value is
+# both worded like a placeholder and lacking a real credential's character mix
+# -- which is why $AWS_SEC above stays caught despite containing "EXAMPLE".
+must_ignore 'password = "your-password-here-replace-me"'                        "placeholder: your-...-here"
+must_ignore 'DB_PASSWORD = "changeme-changeme-changeme"'                        "placeholder: changeme"
+must_ignore 'api_key = "your-example-api-key-here"'                             "placeholder: example value"
+must_ignore 'token = "replace-with-your-real-token"'                            "placeholder: replace-with"
+# A structurally unambiguous credential is never placeholder-filtered, even
+# when it is literally a documented sample.
+must_catch "aws_id = \"$AWS_ID\""                                               "AWS key id is never placeholder-filtered"
+must_catch 'secret = "REPLACE/ME+WITH1234567890abcdEFGH"'                       "mixed-case value with symbols is not a placeholder"
+
 git -C "$REPO" rm -q --cached cred_probe.txt
 rm -f "$REPO/cred_probe.txt"
 
@@ -275,13 +289,182 @@ set -e
 [[ "$CONFIGURED_STATUS" -eq 1 ]] || fail "configured native hook should block staged secret"
 assert_contains "$CONFIGURED_OUTPUT" "commit blocked"
 
-# --- fan-out path ------------------------------------------------------------
-# A >15-file diff is reviewed by one ferret-reviewer per vector. The whole point
-# of that path is that the diff is collected ONCE and split, so total cost stays
-# ~= the diff instead of (vectors x diff). These assertions pin the economics
-# and the partition; a regression here is invisible in output but multiplies the
-# token cost of every large review.
-FAN="$TEST_TMP/fanout"
+# --- false-positive cache ----------------------------------------------------
+# The suppression round trip is what makes repeat reviews usable: dismiss a
+# finding once and its structural pattern stays quiet as the code moves around
+# it. That means the hash must be stable across the things that legitimately
+# drift (line numbers, whitespace, case, directory) and must NOT collide across
+# the things that distinguish findings (file, vector, wording).
+FPC="python3 $ROOT/scripts/fp_cache.py"
+fp_hash() { (cd "$REPO" && $FPC hash "$1" "$2" "$3"); }
+fp_check() { # -> SUPPRESSED | OPEN
+  local st
+  set +e
+  (cd "$REPO" && $FPC check "$1" "$2" "$3" >/dev/null 2>&1)
+  st=$?
+  set -e
+  [[ "$st" -eq 0 ]] && echo SUPPRESSED || echo OPEN
+}
+
+MSG='Race condition during balance debit at line 42'
+[[ "$(fp_check src/pay.py CONCURRENCY "$MSG")" == OPEN ]] \
+  || fail "an unrecorded finding must not be suppressed"
+
+# Nothing is written until a human actually dismisses something.
+[[ ! -f "$REPO/.ferret/review-cache.json" ]] || fail "check must not create the cache"
+
+(cd "$REPO" && $FPC add src/pay.py CONCURRENCY "$MSG" "guarded by an outer transaction" >/dev/null)
+[[ -f "$REPO/.ferret/review-cache.json" ]] || fail "add must persist the cache"
+[[ "$(fp_check src/pay.py CONCURRENCY "$MSG")" == SUPPRESSED ]] \
+  || fail "a recorded finding must be suppressed"
+
+# Stable across drift: line numbers, whitespace, case, and directory moves.
+[[ "$(fp_check src/pay.py CONCURRENCY 'Race condition during balance debit at line 987')" == SUPPRESSED ]] \
+  || fail "suppression must survive a line-number change"
+[[ "$(fp_check src/pay.py CONCURRENCY 'Race   condition during   balance debit at line 42')" == SUPPRESSED ]] \
+  || fail "suppression must survive whitespace changes"
+[[ "$(fp_check src/pay.py concurrency 'RACE CONDITION DURING BALANCE DEBIT AT LINE 42')" == SUPPRESSED ]] \
+  || fail "suppression must be case-insensitive"
+[[ "$(fp_check billing/v2/pay.py CONCURRENCY "$MSG")" == SUPPRESSED ]] \
+  || fail "suppression keys on basename, so a moved file stays suppressed"
+
+# Distinct across the things that make a finding a different finding.
+[[ "$(fp_check src/other.py CONCURRENCY "$MSG")" == OPEN ]] \
+  || fail "a different file must not inherit a suppression"
+[[ "$(fp_check src/pay.py LOGIC "$MSG")" == OPEN ]] \
+  || fail "a different vector must not inherit a suppression"
+[[ "$(fp_check src/pay.py CONCURRENCY 'Unbounded retry loop never terminates')" == OPEN ]] \
+  || fail "a different message must not inherit a suppression"
+
+# hash is deterministic and agrees with what add/check use.
+H1="$(fp_hash src/pay.py CONCURRENCY "$MSG")"
+H2="$(fp_hash src/pay.py CONCURRENCY "$MSG")"
+[[ -n "$H1" && "$H1" == "$H2" ]] || fail "suppression hash must be deterministic"
+[[ "$(fp_hash src/pay.py CONCURRENCY 'a wholly different finding')" != "$H1" ]] \
+  || fail "different messages must hash differently"
+
+FP_LIST="$(cd "$REPO" && $FPC list 2>&1)"
+assert_contains "$FP_LIST" "$H1"
+assert_contains "$FP_LIST" "guarded by an outer transaction"
+
+# The cache is meant to be committed and shared, so it must stay valid JSON
+# with the reason preserved for whoever reads it later.
+python3 - "$REPO/.ferret/review-cache.json" <<'PY' || fail "review-cache.json must be valid, shareable JSON"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("version") == 1, d
+s = d.get("suppressions") or {}
+assert len(s) == 1, s
+entry = next(iter(s.values()))
+blob = json.dumps(entry)
+assert "outer transaction" in blob, entry
+PY
+
+# A corrupt cache must not take the review down with it.
+printf 'not json at all\n' > "$REPO/.ferret/review-cache.json"
+[[ "$(fp_check src/pay.py CONCURRENCY "$MSG")" == OPEN ]] \
+  || fail "a corrupt cache must degrade to 'not suppressed', not crash"
+rm -f "$REPO/.ferret/review-cache.json"
+
+# --- triage mechanics --------------------------------------------------------
+# /code-ferret:triage is prompt-driven, so what can be pinned here is the
+# machinery it drives: read the findings file, apply a patch with git apply,
+# record a suppression, and notice a finding whose location has drifted. This
+# is the only command that writes to the working tree, so a break here is
+# destructive rather than merely noisy.
+TRI="$TEST_TMP/triage"
+mkdir -p "$TRI"
+git -C "$TRI" init -q .
+git -C "$TRI" config user.email t@example.com
+git -C "$TRI" config user.name T
+printf 'def total(xs):\n    return sum(xs) / len(xs)\n' > "$TRI/calc.py"
+git -C "$TRI" add -A
+git -C "$TRI" commit -qm base
+
+cat > "$TRI/patch.diff" <<'EOF'
+--- a/calc.py
++++ b/calc.py
+@@ -1,2 +1,4 @@
+ def total(xs):
++    if not xs:
++        return 0
+     return sum(xs) / len(xs)
+EOF
+python3 - "$TRI" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+(root / ".ferret").mkdir(exist_ok=True)
+(root / ".ferret" / "last-review.json").write_text(json.dumps({
+    "generated_at": "2026-08-01T00:00:00Z", "target": "head",
+    "findings": [{
+        "id": "f1", "file": "calc.py", "line": 2, "character": 12,
+        "severity": "CRITICAL", "vector": "LOGIC", "confidence": "HIGH",
+        "message": "ZeroDivisionError on an empty sequence",
+        "explanation": "len(xs) is 0 for an empty list, so total([]) raises.",
+        "patch": (root / "patch.diff").read_text(),
+        "codegen_instructions": "Guard the empty case before dividing.",
+        "suppression_hash": "deadbeefdeadbeef",
+    }],
+}, indent=2))
+PY
+
+# The findings file triage consumes must round-trip and carry a usable patch.
+# Extract via python, not command substitution: $(...) strips trailing newlines
+# and git apply rejects a patch whose final line has none.
+python3 -c "
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+d=json.loads((root/'.ferret'/'last-review.json').read_text())
+p=d['findings'][0]['patch']
+(root/'extracted.diff').write_text(p if p.endswith('\n') else p+'\n')" "$TRI"
+(cd "$TRI" && git apply --check extracted.diff) \
+  || fail "a patch stored in last-review.json must apply cleanly when extracted"
+
+# Accept & apply patch.
+(cd "$TRI" && git apply extracted.diff) || fail "triage must be able to apply a stored patch"
+assert_contains "$(cat "$TRI/calc.py")" "if not xs:"
+python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$TRI/calc.py" \
+  || fail "an applied patch must leave the file parseable"
+
+# Applying twice must fail rather than silently corrupt the file.
+set +e
+(cd "$TRI" && git apply extracted.diff 2>/dev/null)
+TRI_TWICE=$?
+set -e
+[[ "$TRI_TWICE" -ne 0 ]] || fail "re-applying an applied patch must fail, not double-patch"
+
+# Ignore pattern: the suppression triage records must silence the same finding.
+(cd "$TRI" && $FPC add calc.py LOGIC "ZeroDivisionError on an empty sequence" "guarded upstream" >/dev/null)
+set +e
+(cd "$TRI" && $FPC check calc.py LOGIC "ZeroDivisionError on an empty sequence" >/dev/null 2>&1)
+TRI_SUP=$?
+set -e
+[[ "$TRI_SUP" -eq 0 ]] || fail "triage's Ignore pattern must suppress the finding on a re-run"
+
+# Stale findings: triage skips a finding whose location no longer matches.
+printf 'def total(xs):\n    return 0\n' > "$TRI/calc.py"
+(cd "$TRI" && git apply --check extracted.diff 2>/dev/null) \
+  && fail "a drifted patch must not report as applicable" || true
+
+# Contract: triage must use the cache and git apply, and must not silently
+# rewrite the tree without the user choosing to.
+TRIAGE_MD="$ROOT/commands/triage.md"
+grep -q 'fp_cache.py' "$TRIAGE_MD"        || fail "triage must record suppressions via fp_cache.py"
+grep -q 'git apply' "$TRIAGE_MD"          || fail "triage must apply patches with git apply"
+grep -qi 'AskUserQuestion' "$TRIAGE_MD"   || fail "triage must ask before acting on each finding"
+grep -qi 'stale' "$TRIAGE_MD"             || fail "triage must handle findings whose location drifted"
+grep -q 'last-review.json' "$TRIAGE_MD"   || fail "triage must read the findings file"
+# /review is read-only; only triage writes.
+grep -qi 'do NOT modify the working tree' "$ROOT/commands/review.md" \
+  || fail "/review must state that it does not modify the working tree"
+
+# --- sequential batching (fan-out must never happen) -------------------------
+# Reviews run in ONE context. Subagents were removed in 0.4.0: each one starts
+# cold, re-derives context the orchestrator already holds, and re-reads shared
+# files, so a parallel review costs a multiple of a sequential one for the same
+# findings. plan-shards.sh survives to split a large diff into balanced batches
+# processed in sequence, not to feed parallel agents.
+FAN="$TEST_TMP/batching"
 mkdir -p "$FAN"
 git -C "$FAN" init -q .
 git -C "$FAN" config user.email fan@example.com
@@ -292,72 +475,88 @@ git -C "$FAN" config user.name Fan
 # weights by diff size, so twenty large files each gaining one line all weigh
 # the same and any splitter looks balanced.
 mkdir -p "$FAN/src"
-python3 - "$FAN" baseline <<'PY'
+python3 - "$FAN" <<'EOF'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 for i in range(1, 21):
     (root / "src" / f"mod{i}.py").write_text(f"def mod{i}(x):\n    return x\n")
 (root / "package-lock.json").write_text('{"lockfileVersion":3,"packages":{}}\n')
-PY
+EOF
 git -C "$FAN" add -A
-git -C "$FAN" commit -qm "fanout baseline"
+git -C "$FAN" commit -qm "batching baseline"
 FAN_BASE="$(git -C "$FAN" rev-parse HEAD)"
 
-python3 - "$FAN" <<'PY'
+python3 - "$FAN" <<'EOF'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 for i in range(1, 21):
     p = root / "src" / f"mod{i}.py"
-    body = "".join(f"    v{j} = {j}\n" for j in range(1, i * 20 + 1))
-    p.write_text(p.read_text() + body)
-PY
-python3 - "$FAN/package-lock.json" <<'PY'
-import json, sys
-d = {"lockfileVersion": 3, "packages": {}}
-for i in range(300):
-    d["packages"][f"node_modules/p{i}"] = {"version": f"1.0.{i}", "integrity": "sha512-" + "B" * 64}
-open(sys.argv[1], "w").write(json.dumps(d, indent=2))
-PY
+    p.write_text(p.read_text() + "".join(f"    v{j} = {j}\n" for j in range(1, i * 20 + 1)))
+EOF
 git -C "$FAN" add -A
-git -C "$FAN" commit -qm "fanout change"
-
-FAN_FILES="$(git -C "$FAN" diff "$FAN_BASE...HEAD" --name-only | grep -c .)"
-[[ "$FAN_FILES" -gt 15 ]] || fail "fan-out fixture must exceed the 15-file threshold (got $FAN_FILES)"
+git -C "$FAN" commit -qm "batching change"
 
 FAN_PLAN="$(cd "$FAN" && bash "$ROOT/scripts/plan-shards.sh" "$FAN_BASE" 5)"
-FAN_SHARDS="$(printf '%s\n' "$FAN_PLAN" | grep -c .)"
-[[ "$FAN_SHARDS" -eq 5 ]] || fail "expected 5 shards for a 5-vector fan-out, got $FAN_SHARDS"
+[[ "$(printf '%s\n' "$FAN_PLAN" | grep -c .)" -eq 5 ]] || fail "expected 5 batches"
 
-# Partition: every reviewable file appears in exactly one shard, lockfile in none.
+# Partition: every reviewable file in exactly one batch, lockfile in none.
 FAN_PLANNED="$(printf '%s\n' "$FAN_PLAN" | tr ':' '\n' | grep . | sort)"
 FAN_TRUTH="$(git -C "$FAN" diff "$FAN_BASE...HEAD" --name-only | grep -v package-lock.json | sort)"
-[[ "$FAN_PLANNED" == "$FAN_TRUTH" ]] || fail "shard plan must cover every reviewable file exactly once"
+[[ "$FAN_PLANNED" == "$FAN_TRUTH" ]] || fail "batch plan must cover every reviewable file exactly once"
 [[ "$(printf '%s\n' "$FAN_PLANNED" | sort -u | wc -l)" -eq "$(printf '%s\n' "$FAN_PLANNED" | wc -l)" ]] \
-  || fail "a file appears in more than one shard"
-[[ "$FAN_PLAN" != *package-lock.json* ]] || fail "lockfile must not consume a shard"
+  || fail "a file appears in more than one batch"
+[[ "$FAN_PLAN" != *package-lock.json* ]] || fail "lockfile must not consume a batch"
 
-# Economics: collecting per shard must total ~one collection, never 5x it.
+# Batches must sum to about one collection. Sequential batching cannot cost a
+# multiple of the diff; if it does, FERRET_FILES stopped scoping.
 FAN_WHOLE="$(cd "$FAN" && bash "$ROOT/scripts/collect-context.sh" "$FAN_BASE" 2>/dev/null | wc -c)"
 FAN_SUM=0; FAN_MAX=0
 while IFS= read -r shard; do
   [[ -z "$shard" ]] && continue
   n="$(cd "$FAN" && FERRET_FILES="$shard" bash "$ROOT/scripts/collect-context.sh" "$FAN_BASE" 2>/dev/null | wc -c)"
-  FAN_SUM=$(( FAN_SUM + n ))
-  [[ "$n" -gt "$FAN_MAX" ]] && FAN_MAX="$n"
+  FAN_SUM=$(( FAN_SUM + n )); [[ "$n" -gt "$FAN_MAX" ]] && FAN_MAX="$n"
 done <<< "$FAN_PLAN"
 [[ "$FAN_SUM" -lt $(( FAN_WHOLE * 2 )) ]] \
-  || fail "sharded collection ($FAN_SUM) must stay near one whole collection ($FAN_WHOLE), not a multiple"
-# Balanced packing. Threshold is empirical, not a guess: on this fixture the
-# shipped longest-processing-time-first packer puts 20% of the bytes in its
-# fattest shard (20% is the floor for 5 shards), while a size-blind round-robin
-# by filename puts 25%. 23% sits between them, so this fails if the packer
-# regresses to name order and passes with ~3pp of headroom otherwise.
-# Wall-clock for a fan-out is set by the fattest shard, so this is the assertion
-# that protects the parallelism, not just the token total.
+  || fail "batched collection ($FAN_SUM) must stay near one collection ($FAN_WHOLE)"
+# Balanced packing keeps each sequential batch a similar size. Threshold is
+# empirical: the shipped longest-processing-time-first packer puts 20% of the
+# bytes in its largest batch (20% is the floor for 5), a size-blind round-robin
+# by filename puts 25%.
 [[ $(( FAN_MAX * 100 )) -lt $(( FAN_SUM * 23 )) ]] \
-  || fail "fattest shard is $(( FAN_MAX * 100 / FAN_SUM ))% of the total; expected <23% (size-blind splitting gives ~25%)"
+  || fail "largest batch is $(( FAN_MAX * 100 / FAN_SUM ))% of the total; expected <23%"
 
-# Each shard must be independently reviewable: its own files present, others absent.
+# A balanced plan must say nothing. Warning on every run trains people to
+# ignore the one case that matters.
+[[ -z "$(cd "$FAN" && bash "$ROOT/scripts/plan-shards.sh" "$FAN_BASE" 5 2>&1 >/dev/null)" ]] \
+  || fail "a balanced plan must not emit a warning"
+
+# A batch cannot be split below one file, so a single dominant file caps how
+# even the plan can get. That must be surfaced, not silently shipped as a
+# "balanced" plan.
+DOM="$TEST_TMP/dominant"
+mkdir -p "$DOM"; git -C "$DOM" init -q .
+git -C "$DOM" config user.email d@example.com; git -C "$DOM" config user.name D
+for i in 1 2 3 4 5; do printf 'x\n' > "$DOM/f$i.py"; done
+git -C "$DOM" add -A; git -C "$DOM" commit -qm base
+DOM_BASE="$(git -C "$DOM" rev-parse HEAD)"
+python3 - "$DOM" <<'EOF'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+(root / "f1.py").write_text("x\n" + "".join(f"a{i}=1\n" for i in range(2000)))
+for i in range(2, 6):
+    (root / f"f{i}.py").write_text("x\n" + "".join(f"b{j}=1\n" for j in range(5)))
+EOF
+git -C "$DOM" add -A; git -C "$DOM" commit -qm change
+DOM_ERR="$(cd "$DOM" && bash "$ROOT/scripts/plan-shards.sh" "$DOM_BASE" 5 2>&1 >/dev/null)"
+assert_contains "$DOM_ERR" "f1.py"
+assert_contains "$DOM_ERR" "cannot be split further"
+# The note goes to stderr so it never corrupts the batch list on stdout.
+DOM_OUT="$(cd "$DOM" && bash "$ROOT/scripts/plan-shards.sh" "$DOM_BASE" 5 2>/dev/null)"
+[[ "$DOM_OUT" != *"note:"* ]] || fail "the dominance note must not contaminate stdout"
+[[ "$(printf '%s\n' "$DOM_OUT" | tr ':' '\n' | grep -c .)" -eq 5 ]] \
+  || fail "all five files must still be planned despite the imbalance"
+
+# Each batch must be independently reviewable: own files present, others absent.
 FAN_FIRST="$(printf '%s\n' "$FAN_PLAN" | head -1)"
 FAN_FIRST_CTX="$(cd "$FAN" && FERRET_FILES="$FAN_FIRST" bash "$ROOT/scripts/collect-context.sh" "$FAN_BASE" 2>/dev/null)"
 while IFS= read -r f; do
@@ -366,37 +565,31 @@ while IFS= read -r f; do
 done < <(printf '%s\n' "$FAN_FIRST" | tr ':' '\n' | grep .)
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
-  [[ "$FAN_FIRST_CTX" != *"+++ b/$f"* ]] || fail "shard leaked a file from another shard: $f"
+  [[ "$FAN_FIRST_CTX" != *"+++ b/$f"* ]] || fail "batch leaked a file from another batch: $f"
 done < <(printf '%s\n' "$FAN_PLAN" | tail -n +2 | tr ':' '\n' | grep .)
 
-# The reviewer agent's contract is what keeps the fan-out cheap and on-model.
-AGENT="$ROOT/agents/ferret-reviewer.md"
-grep -q '^model: sonnet' "$AGENT" || fail "ferret-reviewer must pin a model, else N agents inherit the session model"
-grep -q '^effort: high' "$AGENT"  || fail "ferret-reviewer must pin an effort level"
-grep -q '^tools: '      "$AGENT"  || fail "ferret-reviewer must declare its tools"
-grep -qi 'do NOT re-run' "$AGENT" || fail "ferret-reviewer must forbid re-running the collector"
-grep -qi 'FERRET_FILES' "$AGENT"  || fail "ferret-reviewer must document shard-scoped collection"
-grep -q 'plan-shards.sh' "$ROOT/commands/review.md" || fail "/review must source shards from plan-shards.sh"
-grep -qi 'must NOT re-run the collector' "$ROOT/commands/review.md" \
-  || fail "/review must tell agents not to re-collect"
-
-# Shards are split by FILE, and every agent runs every vector on its own files.
-# Splitting by vector instead covers only 1/Nth of the file x vector matrix:
-# measured on a 23-file diff with 12 planted bugs it recalled 6/12, because an
-# agent that spots a defect outside "its" vector drops it and no other agent is
-# ever shown that file. These assertions keep the two from being confused again.
-grep -qi 'ALL FIVE' "$AGENT" \
-  || fail "ferret-reviewer must apply all five vectors to its shard, not one vector"
-grep -qi 'never by vector' "$AGENT" \
-  || fail "ferret-reviewer must state that shards split by file, not vector"
-grep -qi 'never drop a finding because it feels like it belongs to a different vector' "$AGENT" \
-  || fail "ferret-reviewer must forbid dropping out-of-vector findings"
-grep -qi 'per .*file shard' "$ROOT/commands/review.md" \
-  || fail "/review must fan out per file shard"
-grep -qi 'Shard by file, never by vector' "$ROOT/commands/review.md" \
-  || fail "/review must warn against per-vector sharding"
-[[ "$(grep -ci 'one per vector' "$ROOT/commands/review.md")" -eq 0 ]] \
-  || fail "/review must no longer instruct one agent per vector"
+# No subagent surface may exist anywhere in the plugin. This is the assertion
+# that keeps the fan-out from coming back: it failed twice, once by collecting
+# the diff per agent and once by covering a fifth of the file x vector matrix.
+[[ ! -e "$ROOT/agents" ]] || fail "agents/ must not exist: reviews run in one context"
+# The reviewer agent must be gone from every prompt surface, and no file may
+# instruct a dispatch. "subagent" is allowed only inside the prohibition, so
+# match the imperative forms rather than the bare word.
+for f in "$ROOT/commands/review.md" "$ROOT/commands/precommit.md" \
+         "$ROOT/commands/triage.md" "$ROOT/skills/code-ferret/SKILL.md"; do
+  [[ "$(grep -ci 'ferret-reviewer' "$f")" -eq 0 ]] \
+    || fail "$(basename "$f") still references the deleted ferret-reviewer agent"
+  # Drop negated lines first, so the prohibitions themselves do not trip this.
+  # Line-based rather than sed -I: BSD sed has no case-insensitive substitute
+  # flag, so the pattern silently no-ops on macOS and the check passes blind.
+  [[ "$(grep -viE "never|do not|don't|must not" "$f" \
+        | grep -ciE 'fan out to|fan-out to|dispatch (a |an |the )?(sub)?agent|spawn (a |an )?(sub)?agent|one per vector|one per (file )?shard')" -eq 0 ]] \
+    || fail "$(basename "$f") still instructs a subagent dispatch"
+done
+grep -qi 'Never dispatch subagents' "$ROOT/commands/review.md" \
+  || fail "/review must explicitly forbid dispatching subagents"
+grep -qi 'sequential batches' "$ROOT/commands/review.md" \
+  || fail "/review must describe sequential batching for large diffs"
 
 python3 "$ROOT/tests/test_run_tools.py"
 

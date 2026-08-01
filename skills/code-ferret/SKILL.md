@@ -15,19 +15,21 @@ specific inputs or state that produce a wrong result, crash, leak, or exploit.
 A review's cost is dominated by how many times the diff enters a context
 window, not by how hard the analysis is. Four rules, in priority order:
 
-1. **Collect once.** One `collect-context.sh` run per review. Every subagent
-   reads the same `.ferret/context.txt`; none re-runs the collector. Five
-   vector agents that each collect turn one review into six.
-2. **Keep the payload out of the transcript.** Always use `FERRET_OUT`, then
+1. **One reviewer, one context.** Review the diff yourself. Do not delegate it
+   to other agents: each one starts cold, re-derives context you already hold,
+   and re-reads the same shared files, so the review costs a multiple of what
+   it should and returns the same findings. There is no diff size at which
+   delegating pays off.
+2. **Collect once.** One `collect-context.sh` run per review, reused for every
+   batch. Re-collecting per batch multiplies the dominant cost.
+3. **Keep the payload out of the transcript.** Always use `FERRET_OUT`, then
    Read only the index ranges you need.
-3. **Shard, don't duplicate.** Split a large diff across agents with
-   `FERRET_FILES`, so the total collected equals the diff, not a multiple of it.
 4. **Don't re-read what the diff already shows.** The diff carries surrounding
    scope. Opening changed files "for context" pays for the same code twice.
 
-Match the depth to the ask: `/precommit` is one light inline pass, never a
-fan-out. Fan out only above ~15 changed files, where parallelism buys more
-than the duplicated overhead costs.
+Match the depth to the ask: `/precommit` is one light pass. A large diff is
+worked through in sequential batches (`plan-shards.sh`) inside this one
+context — same coverage, no duplicated setup.
 
 ## Phase 1 — Context acquisition
 
@@ -47,8 +49,9 @@ than the duplicated overhead costs.
    from a repo-root `.ferretignore` file (same syntax as .gitignore).
 
    Collection cost is the dominant cost of a review. Collect once per review
-   and reuse the file — including across every subagent you dispatch. Shard a
-   large diff with `FERRET_FILES="a.py:b.ts"` rather than collecting it twice.
+   and reuse the file across every batch. When working a large diff in
+   batches, scope each one with `FERRET_FILES="a.py:b.ts"` against the file
+   already collected rather than collecting again.
    `FERRET_SKIP_GUIDELINES=1` drops AGENTS.md/CLAUDE.md bodies, which the host
    session already carries; omit it only when they are not already in context.
 

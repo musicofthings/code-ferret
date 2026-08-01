@@ -1,6 +1,6 @@
 {
   "name": "code-ferret-cli",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "CodeFerret CLI — diff-scoped semantic code review driven by your installed coding agent.",
   "type": "module",
   "bin": {
