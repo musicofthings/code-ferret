@@ -10,10 +10,20 @@ vs HEAD; `staged` = index only; anything else is treated as a base ref, e.g.
 
 Steps:
 
-1. Collect context:
-   `bash ${CLAUDE_PLUGIN_ROOT}/scripts/collect-context.sh <target>`
-   If the diff is empty, say so and stop. If it is very large (>15 files),
-   review in batches grouped by directory so no hunk is skipped.
+1. Collect context ONCE, to a file — never inline into the transcript:
+
+   ```
+   FERRET_OUT=.ferret/context.txt FERRET_SKIP_GUIDELINES=1 \
+     bash ${CLAUDE_PLUGIN_ROOT}/scripts/collect-context.sh <target>
+   ```
+
+   This prints only a FERRET_INDEX (section line ranges + changed files),
+   typically a few hundred tokens; the payload stays on disk. If the changed
+   file list is empty, say so and stop.
+
+   `FERRET_SKIP_GUIDELINES=1` omits AGENTS.md/CLAUDE.md bodies because the
+   session already has them; drop that flag only if they are genuinely absent
+   from your context.
 
 2. Run installed analyzers:
    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run_tools.py <target>`
@@ -21,13 +31,30 @@ Steps:
    or errors, but disclose that status. Treat analyzer findings as evidence and
    deduplicate equivalent semantic findings instead of reporting them twice.
 
-3. Read each changed file's relevant scope (enclosing functions/classes, call
-   sites of changed signatures). Use the FERRET_FILE_HISTORY section to spot
-   regressions of previously fixed bugs.
+3. Read the diff from `.ferret/context.txt` using the index line ranges —
+   Read the `FERRET_DIFF` range, not the whole file. The diff already carries
+   surrounding lexical scope, so do NOT re-open changed files wholesale; open a
+   file only to see a call site or definition the diff does not contain. Use
+   the FERRET_FILE_HISTORY range to spot regressions of previously fixed bugs.
 
 4. Analyze every hunk against all five vectors
    (skill references/detection-vectors.md): LOGIC, SECURITY, CONCURRENCY,
    PERFORMANCE, API.
+
+   For a large diff (>15 files), fan out to `ferret-reviewer` subagents — one
+   per vector, in a single parallel batch. Get the file subsets from:
+
+   ```
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/plan-shards.sh <target> 5
+   ```
+
+   It prints one colon-joined file list per line, balanced by diff size, so no
+   agent gets stuck with most of the diff. Give each agent one line plus the
+   `.ferret/context.txt` path. Agents must NOT re-run the collector: collecting
+   once and sharding is what keeps a fan-out review from costing N× the diff.
+
+   Otherwise review inline; do not spawn agents for a small diff, where the
+   fan-out overhead exceeds the work.
 
 5. Filter noise:
    - Drop findings a configured linter already enforces.

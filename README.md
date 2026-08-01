@@ -154,10 +154,19 @@ hook on the pure-bash secret scan rather than a full review.
 
 ## What gets reviewed
 
-Only the diff plus its surrounding lexical scope (±50 lines), never the whole
-repo. Standard `.gitignore` rules apply automatically; add a `.ferretignore`
+Only the diff plus its surrounding lexical scope, never the whole repo. Each
+hunk is shown with its **complete enclosing function** (`git -W`), not a fixed
+number of context lines — a small edit deep inside a 600-line function still
+arrives with the whole function attached, which a fixed `-U` window cannot do.
+Standard `.gitignore` rules apply automatically; add a `.ferretignore`
 (gitignore syntax) at the repo root to also skip generated files, schemas,
 minified assets, etc.
+
+Lockfile *hunks* (`package-lock.json`, `Cargo.lock`, `go.sum`, and nine others)
+are omitted by default — thousands of machine-generated lines no semantic
+vector can find a bug in. Their names still appear in the changed-file and
+dependency-manifest lists, so version-bump analysis is unaffected. Set
+`FERRET_INCLUDE_LOCKFILES=1` to include them.
 
 Detection vectors:
 
@@ -202,6 +211,38 @@ behavior. Supported controls include:
 
 `/code-ferret:review` runs use the working tree configuration and root-level
 guideline context from `collect-context.sh`.
+
+### Collector environment variables
+
+`collect-context.sh` is tuned through the environment. Defaults are chosen so a
+review is cheap without losing the context needed to trace a failure.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `FERRET_FUNCTION_CONTEXT` | `1` (`0` in light mode) | Show each hunk's complete enclosing function via `git -W`. `0` falls back to a fixed line count. |
+| `FERRET_CONTEXT_LINES` | `12` (`6` light) | Fixed context lines when function context is off. |
+| `FERRET_OUT` | unset | Write the payload to this path and print only a compact index of section line ranges. Keeps a large diff out of the agent's transcript. |
+| `FERRET_FILES` | unset | Colon- or newline-separated file subset. Shards a diff across parallel reviewers. |
+| `FERRET_SKIP_GUIDELINES` | `0` | Omit `AGENTS.md`/`CLAUDE.md`/`.cursorrules` bodies when the host agent already has them. |
+| `FERRET_INCLUDE_LOCKFILES` | `0` | Include lockfile hunks in the diff. |
+| `FERRET_LIGHT` | `0` | Speed over depth: fixed `-U6`, no per-file history. |
+| `FERRET_DIR_PATHSPEC` | `.` | Restrict everything to one subtree. |
+| `FERRET_BASE_REF` | `main` | Base ref for `all` mode. |
+| `FERRET_INCLUDE_UNTRACKED` | mode-dependent | Force untracked files in. |
+| `FERRET_MAX_TOOL_OUTPUT` | `8000` | Per-analyzer output cap, head+tail truncated so summary lines survive. |
+
+### Sharding a large review
+
+`scripts/plan-shards.sh <target> <n>` prints `n` colon-joined file lists,
+balanced by diff size rather than file count, ready to pass as `FERRET_FILES`:
+
+```bash
+bash scripts/plan-shards.sh main 5
+```
+
+Collect once with `FERRET_OUT`, then give each reviewer one shard and the
+shared context file. Collecting per-agent instead multiplies a review's cost by
+the number of agents.
 
 ## Noise control
 
@@ -255,9 +296,17 @@ If the target repository is not the CodeFerret checkout, set
 # Shell collectors, secret scanner, commit guards, and the analyzer runner
 bash tests/run.sh
 
+# Analyzer runner and model checks
+python3 -m pytest tests/ -v
+
 # CLI unit tests
 cd cli && npm test
 ```
+
+`tests/run.sh` covers the context-collection controls that determine what a
+reviewer actually sees: `FERRET_OUT` indexing, `FERRET_FILES` sharding (both
+ends of the list), guideline omission, lockfile suppression and opt-in,
+function context on/off/light, and shard partitioning.
 
 ## Layout
 
@@ -269,7 +318,7 @@ code-ferret/
 ├── skills/code-ferret/             # review methodology + vector checklists + schema
 ├── agents/ferret-reviewer.md       # per-vector subagent for parallel review of big diffs
 ├── hooks/hooks.json                # PreToolUse git-commit secret guard
-├── scripts/                        # collectors, analyzers, fp cache
+├── scripts/                        # collectors, shard planner, analyzers, fp cache
 ├── cli/                            # standalone `ferret` CLI (delegates to your agent)
 ├── mcp-server/                     # MCP server + MCPB bundle build (Claude Desktop et al.)
 ├── packaging/                      # Codex prompts/config, Claude Desktop install guide

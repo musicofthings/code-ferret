@@ -14,8 +14,11 @@ Steps:
 1. `bash ${CLAUDE_PLUGIN_ROOT}/scripts/scan-secrets.sh staged`
    Any hit is an automatic blocker — report the file:line (never the value).
 
-2. `bash ${CLAUDE_PLUGIN_ROOT}/scripts/collect-context.sh staged`
-   If empty, report "nothing staged" and stop.
+2. `FERRET_LIGHT=1 FERRET_SKIP_GUIDELINES=1 bash ${CLAUDE_PLUGIN_ROOT}/scripts/collect-context.sh staged`
+   Light mode is what makes this command cheap: `-U6` diff context and no
+   per-file history. If empty, report "nothing staged" and stop.
+   Never fan out to subagents in this mode, and never run the analyzer step —
+   one inline pass only.
 
 3. Single fast pass over the hunks for commit-blockers only: hardcoded
    secrets, injection, unsafe deserialization, guaranteed crashes

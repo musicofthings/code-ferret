@@ -88,6 +88,99 @@ UNSCOPED="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" uncommitted)"
 assert_contains "$UNSCOPED" "+++ b/app.txt"
 assert_contains "$UNSCOPED" "+++ b/sub/scoped.txt"
 
+# --- token-cost controls: FERRET_OUT / FERRET_FILES / lockfiles / sharding ---
+# Collection is the dominant token cost of a review, so each of these has a
+# cost claim attached; a regression here is silent and expensive.
+
+# FERRET_OUT: payload to disk, only an index on stdout.
+OUT_FILE="$REPO/.ferret/ctx.txt"
+OUT_INDEX="$(cd "$REPO" && FERRET_OUT=".ferret/ctx.txt" bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$OUT_INDEX" "=== FERRET_INDEX ==="
+assert_contains "$OUT_INDEX" "context_file: .ferret/ctx.txt"
+[[ -f "$OUT_FILE" ]] || fail "FERRET_OUT must write the payload to disk"
+assert_contains "$(cat "$OUT_FILE")" "=== FERRET_DIFF ==="
+[[ "$OUT_INDEX" != *"+++ b/app.txt"* ]] || fail "FERRET_OUT must keep diff hunks off stdout"
+[[ "${#OUT_INDEX}" -lt "$(wc -c < "$OUT_FILE")" ]] || fail "FERRET_OUT index must be smaller than the payload"
+
+# FERRET_FILES: shard to a subset. The trailing-newline bug this guards against
+# silently dropped the LAST file in the list, so assert both ends explicitly.
+SHARD="$(cd "$REPO" && FERRET_FILES="app.txt:sub/scoped.txt" bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$SHARD" "+++ b/app.txt"
+assert_contains "$SHARD" "+++ b/sub/scoped.txt"
+SHARD_ONE="$(cd "$REPO" && FERRET_FILES="sub/scoped.txt" bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+[[ "$SHARD_ONE" != *"+++ b/app.txt"* ]] || fail "FERRET_FILES must exclude files outside the shard"
+
+# FERRET_SKIP_GUIDELINES: name retained, body dropped.
+printf 'repo policy body marker ZZQQ\n' > "$REPO/CLAUDE.md"
+git -C "$REPO" add CLAUDE.md
+git -C "$REPO" commit -qm "add CLAUDE.md"
+GUIDE_ON="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+GUIDE_OFF="$(cd "$REPO" && FERRET_SKIP_GUIDELINES=1 bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$GUIDE_ON" "repo policy body marker ZZQQ"
+assert_contains "$GUIDE_OFF" "CLAUDE.md (already in host context; body omitted)"
+[[ "$GUIDE_OFF" != *"repo policy body marker ZZQQ"* ]] || fail "FERRET_SKIP_GUIDELINES must drop guideline bodies"
+
+# Lockfiles: hunks suppressed by default, name still visible, opt-in restores.
+printf '{"lockfileVersion":3,"packages":{"zzlockmarker":1}}\n' > "$REPO/package-lock.json"
+git -C "$REPO" add package-lock.json
+git -C "$REPO" commit -qm "add lockfile"
+printf '{"lockfileVersion":3,"packages":{"zzlockmarker":2}}\n' > "$REPO/package-lock.json"
+LOCK_DEFAULT="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$LOCK_DEFAULT" "package-lock.json"
+assert_contains "$LOCK_DEFAULT" "lockfile hunks omitted"
+[[ "$LOCK_DEFAULT" != *"zzlockmarker"* ]] || fail "lockfile hunks must be suppressed by default"
+LOCK_ON="$(cd "$REPO" && FERRET_INCLUDE_LOCKFILES=1 bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$LOCK_ON" "zzlockmarker"
+
+# plan-shards.sh: every reviewable file placed exactly once, no lockfiles.
+PLAN="$(cd "$REPO" && bash "$ROOT/scripts/plan-shards.sh" uncommitted 3)"
+[[ -n "$PLAN" ]] || fail "plan-shards.sh must emit at least one shard"
+PLAN_FILES="$(printf '%s\n' "$PLAN" | tr ':' '\n' | grep -c . || true)"
+PLAN_UNIQ="$(printf '%s\n' "$PLAN" | tr ':' '\n' | grep . | sort -u | wc -l | tr -d ' ')"
+[[ "$PLAN_FILES" -eq "$PLAN_UNIQ" ]] || fail "plan-shards.sh must not place a file in two shards"
+[[ "$PLAN" != *"package-lock.json"* ]] || fail "plan-shards.sh must not weight suppressed lockfiles"
+assert_contains "$PLAN" "app.txt"
+[[ "$(printf '%s\n' "$PLAN" | wc -l | tr -d ' ')" -le 3 ]] || fail "plan-shards.sh must respect the shard count"
+
+# Function context: an edit deep inside a long function must still show the
+# whole function. A fixed -U count cannot do this (measured 5.5% coverage at
+# -U12 on a 617-line function), so -W is the default outside light mode.
+mkdir -p "$REPO/src"
+{
+  printf 'def big():\n'
+  for i in $(seq 1 60); do printf '    a%s = %s\n' "$i" "$i"; done
+  printf '    return MARKER_TOP\n'
+} > "$REPO/src/big.py"
+git -C "$REPO" add src/big.py
+git -C "$REPO" commit -qm "add big.py"
+# Change one line at the very bottom of the function.
+sed -i.bak 's/return MARKER_TOP/return MARKER_CHANGED/' "$REPO/src/big.py"
+rm -f "$REPO/src/big.py.bak"
+
+# "a1 = 1" sits at the TOP of the function body, ~60 lines above the edit, so
+# only -W reaches it. Do not assert on "def big():": git prints the enclosing
+# function name in the @@ hunk header at every -U setting, so it proves nothing.
+FN_ON="$(cd "$REPO" && FERRET_FILES="src/big.py" bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$FN_ON" "MARKER_CHANGED"
+assert_contains "$FN_ON" "a1 = 1"
+
+FN_OFF="$(cd "$REPO" && FERRET_FILES="src/big.py" FERRET_FUNCTION_CONTEXT=0 \
+  bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+assert_contains "$FN_OFF" "MARKER_CHANGED"
+[[ "$FN_OFF" != *"a1 = 1"* ]] || fail "FERRET_FUNCTION_CONTEXT=0 should fall back to a fixed -U window"
+[[ "${#FN_OFF}" -lt "${#FN_ON}" ]] || fail "fixed -U window should be smaller than function context"
+
+# Light mode trades depth for speed on purpose: it must NOT pull whole functions.
+FN_LIGHT="$(cd "$REPO" && FERRET_FILES="src/big.py" FERRET_LIGHT=1 \
+  bash "$ROOT/scripts/collect-context.sh" uncommitted)"
+[[ "$FN_LIGHT" != *"a1 = 1"* ]] || fail "light mode must not use function context"
+
+set +e
+PLAN_BAD="$(cd "$REPO" && bash "$ROOT/scripts/plan-shards.sh" uncommitted 0 2>&1)"
+PLAN_BAD_STATUS=$?
+set -e
+[[ "$PLAN_BAD_STATUS" -eq 2 ]] || fail "plan-shards.sh must reject a non-positive shard count"
+
 set +e
 INVALID_CONTEXT="$(cd "$REPO" && bash "$ROOT/scripts/collect-context.sh" missing-ref 2>&1)"
 INVALID_CONTEXT_STATUS=$?

@@ -1,6 +1,6 @@
 ---
 name: code-ferret
-description: Semantic code review methodology for diff-scoped bug hunting. Use whenever running a CodeFerret review (/code-ferret:review, /code-ferret:precommit, /code-ferret:triage) or when asked to hunt for bugs, security flaws, race conditions, or performance regressions in a git diff. Covers context acquisition, the five detection vectors, confidence calibration, deduplication, false-positive suppression, and the finding output schema.
+description: Semantic code review methodology for diff-scoped bug hunting. Use for any CodeFerret review (/code-ferret:review, :precommit, :triage) or when asked to hunt bugs, security flaws, race conditions, or performance regressions in a git diff.
 ---
 
 # CodeFerret Review Methodology
@@ -10,18 +10,47 @@ preferences. Compilers, formatters, and linters already catch syntax and style �
 never report what they would. Every finding must describe a concrete failure:
 specific inputs or state that produce a wrong result, crash, leak, or exploit.
 
+## Cost discipline
+
+A review's cost is dominated by how many times the diff enters a context
+window, not by how hard the analysis is. Four rules, in priority order:
+
+1. **Collect once.** One `collect-context.sh` run per review. Every subagent
+   reads the same `.ferret/context.txt`; none re-runs the collector. Five
+   vector agents that each collect turn one review into six.
+2. **Keep the payload out of the transcript.** Always use `FERRET_OUT`, then
+   Read only the index ranges you need.
+3. **Shard, don't duplicate.** Split a large diff across agents with
+   `FERRET_FILES`, so the total collected equals the diff, not a multiple of it.
+4. **Don't re-read what the diff already shows.** The diff carries surrounding
+   scope. Opening changed files "for context" pays for the same code twice.
+
+Match the depth to the ask: `/precommit` is one light inline pass, never a
+fan-out. Fan out only above ~15 changed files, where parallelism buys more
+than the duplicated overhead costs.
+
 ## Phase 1 — Context acquisition
 
-1. Run the context collector to get the scoped diff plus history:
+1. Run the context collector to get the scoped diff plus history. Always
+   collect to a file so the payload never lands inline in the transcript:
 
    ```
-   bash ${CLAUDE_PLUGIN_ROOT}/scripts/collect-context.sh [staged|head|<base-branch>]
+   FERRET_OUT=.ferret/context.txt FERRET_SKIP_GUIDELINES=1 \
+     bash ${CLAUDE_PLUGIN_ROOT}/scripts/collect-context.sh [staged|head|<base-branch>]
    ```
 
-   It emits the diff with 50 lines of surrounding lexical scope, the changed-file
-   list, recent `git log` per changed file, and any dependency manifests touched.
-   It honors `.gitignore` automatically (git does) and additionally excludes
-   patterns from a repo-root `.ferretignore` file (same syntax as .gitignore).
+   Only a `FERRET_INDEX` — section line ranges plus the changed-file list —
+   reaches your context; Read the ranges you actually need from the file. The
+   payload holds the diff with 12 lines of surrounding lexical scope, recent
+   `git log` per changed file, and any dependency manifests touched. It honors
+   `.gitignore` automatically (git does) and additionally excludes patterns
+   from a repo-root `.ferretignore` file (same syntax as .gitignore).
+
+   Collection cost is the dominant cost of a review. Collect once per review
+   and reuse the file — including across every subagent you dispatch. Shard a
+   large diff with `FERRET_FILES="a.py:b.ts"` rather than collecting it twice.
+   `FERRET_SKIP_GUIDELINES=1` drops AGENTS.md/CLAUDE.md bodies, which the host
+   session already carries; omit it only when they are not already in context.
 
    The collector also emits `FERRET_CONFIG` and
    `FERRET_REPOSITORY_GUIDELINES`. Read
@@ -31,9 +60,11 @@ specific inputs or state that produce a wrong result, crash, leak, or exploit.
    review policy. If `guidelines.files` names additional files, read those files
    before analysis when they exist.
 
-2. For each changed hunk, read enough of the file to see the enclosing function
-   or class and its call sites. If a change alters a function signature or public
-   export, grep for its importers — downstream breakage is in scope.
+2. The diff already carries the enclosing lexical scope, so read it, not the
+   files. Open a changed file only when you must see something the diff does
+   not contain — a call site, a base class, a definition elsewhere. If a change
+   alters a function signature or public export, grep for its importers;
+   downstream breakage is in scope. Prefer Grep over reading whole files.
 
 3. If the diff touches a dependency manifest (package.json, requirements.txt,
    go.mod, Cargo.toml, pyproject.toml), check whether version bumps introduce
@@ -116,7 +147,7 @@ the location, never the value.
 When `FERRET_LIGHT=1` (the CLI's `--light`), trade depth for speed:
 
 - skip the installed-analyzer step entirely
-- diff context is already reduced to `-U10` by `collect-context.sh`
+- diff context is already reduced to `-U6` by `collect-context.sh`
 - `FERRET_FILE_HISTORY` is absent — do not treat that as "no prior history"
 - analyze only the LOGIC and SECURITY vectors
 

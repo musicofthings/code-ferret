@@ -5,3 +5,7 @@ node_modules/
 .ferret/
 dist/
 mcp-server/vendor/
+
+# Local session state from context-engineering-kit, not part of the plugin
+.claude/
+session_handover.md

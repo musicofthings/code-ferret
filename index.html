@@ -92,6 +92,11 @@
   .proof li:last-child{border-bottom:none;}
   .proof .tick{flex:none;width:1.5rem;height:1.5rem;border-radius:50%;margin-top:.1rem;background:var(--mint);color:var(--mint-ink);font-weight:700;font-size:.82rem;display:flex;align-items:center;justify-content:center;}
   .proof strong{display:block;color:var(--indigo);}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-top:30px;}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1.2rem 1.3rem;text-align:center;}
+  .stat b{display:block;font-family:var(--mono);font-size:1.75rem;line-height:1.15;color:var(--indigo);}
+  .stat span{display:block;margin-top:.45rem;font-size:.85rem;color:var(--indigo-soft);}
+  .stat em{display:block;margin-top:.3rem;font-size:.75rem;font-style:normal;color:var(--muted);}
 
   /* INSTALL */
   .steps{counter-reset:step;list-style:none;padding:0;margin:30px auto 0;max-width:720px;}
@@ -139,6 +144,7 @@
       <a href="#vectors">Detection</a>
       <a href="#review">Commands</a>
       <a href="#results">Results</a>
+      <a href="#whats-new">What's new</a>
       <a href="#install">Install</a>
     </nav>
     <a class="btn btn-primary" href="#install">Install</a>
@@ -154,7 +160,7 @@
       <h1>Reviews your diff.<br/>Proves every bug.</h1>
       <p class="lead">CodeFerret is an autonomous code-review and bug-hunting plugin — for Claude Code, and via MCP for Claude Desktop, OpenAI Codex, Gemini CLI, and any other MCP client. It reviews the changes you actually made — not your whole repo — and only reports issues it can back with a concrete failure scenario.</p>
       <div class="badges">
-        <span class="badge">v0.2.0</span>
+        <span class="badge">v0.3.0</span>
         <span class="badge green">✓ All local tests passing</span>
         <span class="badge">Claude · GPT · Gemini · Grok</span>
       </div>
@@ -261,6 +267,27 @@
         <li><span class="tick">✓</span><div><strong>Patches verified before offering</strong>Every fix passed <code>git apply --check</code>; the accepted SQL-injection patch applied cleanly and compiled.</div></li>
         <li><span class="tick">✓</span><div><strong>False-positive suppression round trip</strong>Ignoring the race finding recorded its hash in <code>.ferret/review-cache.json</code>; a re-run confirmed silent suppression even when lines shift.</div></li>
         <li><span class="tick">✓</span><div><strong>Pre-commit secret guard</strong>A staged AWS key was caught and the commit blocked with a <code>file:line</code> pointer; committing after removal succeeded.</div></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="band tint" id="whats-new">
+    <div class="wrap narrow">
+      <span class="eyebrow e-mint" style="display:flex;width:max-content;margin:0 auto 1rem;">v0.3.0</span>
+      <h2>Same review, a twelfth of the tokens</h2>
+      <p class="lede">A five-vector fan-out used to collect the same diff six times — once for the orchestrator and once inside every vector agent. It now collects once and shards the work. Measured on a 33-file diff.</p>
+      <div class="stats">
+        <div class="stat"><b>12&times;</b><span>fewer tokens per review</span><em>~480k &rarr; ~40k</em></div>
+        <div class="stat"><b>231&times;</b><span>smaller orchestrator output</span><em>250&nbsp;KB &rarr; 1&nbsp;KB</em></div>
+        <div class="stat"><b>3.7&times;</b><span>lighter slowest agent</span><em>size-balanced shards</em></div>
+        <div class="stat"><b>100%</b><span>enclosing-function context</span><em>up from 17.8%</em></div>
+      </div>
+      <ul class="proof">
+        <li><span class="tick">✓</span><div><strong>Complete functions, not fixed windows</strong>Hunks now arrive with their entire enclosing function via <code>git -W</code>. The old fixed <code>-U50</code> window showed just 17.8% of a 617-line function — too little to trace a failure through it. A correctness fix that no token metric would have caught.</div></li>
+        <li><span class="tick">✓</span><div><strong>Collect once, then shard</strong>Agents share one collected context file and a balanced slice of the diff instead of each re-collecting the whole thing. <code>plan-shards.sh</code> packs by diff size, cutting the fattest shard from 148&nbsp;KB to 39&nbsp;KB.</div></li>
+        <li><span class="tick">✓</span><div><strong>Lockfiles by name, not by body</strong>Twelve lockfile formats keep their entry in the changed-file and dependency lists, but their thousands of generated lines stay out of the diff. Version-bump analysis is unaffected.</div></li>
+        <li><span class="tick">✓</span><div><strong>Pre-commit is finally light</strong><code>/code-ferret:precommit</code> advertised speed over depth but collected at full depth with complete file history. It now runs one light inline pass and never fans out.</div></li>
+        <li><span class="tick">✓</span><div><strong>Verified, not assumed</strong>12 new shell assertions plus a 144-check coverage eval across 5 repositories confirm no changed file is lost between git, the shard plan, and the collected context.</div></li>
       </ul>
     </div>
   </section>
@@ -373,7 +400,7 @@ SECRET src/config.py:1</pre>
 <footer>
   <div class="wrap foot-inner">
     <div class="foot-brand"><img src="assets/codeferret_mascot_coding.png" alt="CodeFerret mascot" width="1024" height="1024" loading="lazy" decoding="async" />CodeFerret</div>
-    <div>CodeFerret v0.2.0 · MIT-style open source · <a href="https://github.com/musicofthings/code-ferret">github.com/musicofthings/code-ferret</a> · Works with Claude, GPT/Codex, Gemini &amp; Grok</div>
+    <div>CodeFerret v0.3.0 · MIT-style open source · <a href="https://github.com/musicofthings/code-ferret">github.com/musicofthings/code-ferret</a> · Works with Claude, GPT/Codex, Gemini &amp; Grok</div>
   </div>
 </footer>
 

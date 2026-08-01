@@ -283,11 +283,25 @@ def target_placeholder() -> str:
     return "__CODEFERRET_TARGET__"
 
 
+# Analyzer output is read into an agent's context, so the cap is a token budget,
+# not just a memory guard. Head and tail both matter: linters put the summary
+# last, so a plain head-truncation throws away the counts.
+MAX_TOOL_OUTPUT = int(os.environ.get("FERRET_MAX_TOOL_OUTPUT", "8000"))
+
+
 def scrub(text: str) -> str:
     sanitized = text
     for pattern in SECRET_PATTERNS:
         sanitized = pattern.sub("[REDACTED_SECRET]", sanitized)
-    return sanitized[:50_000]
+    if len(sanitized) <= MAX_TOOL_OUTPUT:
+        return sanitized
+    keep = MAX_TOOL_OUTPUT // 2
+    dropped = len(sanitized) - 2 * keep
+    return (
+        sanitized[:keep]
+        + f"\n...[{dropped} chars truncated by FERRET_MAX_TOOL_OUTPUT]...\n"
+        + sanitized[-keep:]
+    )
 
 
 def run_tool(spec: ToolSpec, repo: Path, target: str, timeout: int) -> ToolResult:

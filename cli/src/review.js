@@ -172,11 +172,17 @@ Load the code-ferret skill and follow its methodology exactly.
 ${extra}
 1. Collect context: \`bash ${scriptPath("collect-context.sh")} ${target}\`
    The environment already carries FERRET_BASE_REF, FERRET_INCLUDE_UNTRACKED,
-   FERRET_LIGHT, and FERRET_DIR_PATHSPEC — do not override them. When
-   FERRET_DIR_PATHSPEC is set, the diff MUST stay restricted to that subtree;
-   never widen it back to the whole repository.
+   FERRET_LIGHT, FERRET_DIR_PATHSPEC, and FERRET_OUT — do not override them.
+   When FERRET_DIR_PATHSPEC is set, the diff MUST stay restricted to that
+   subtree; never widen it back to the whole repository.
+   FERRET_OUT sends the payload to a file and prints only a FERRET_INDEX of
+   section line ranges: Read the ranges you need from that file rather than
+   dumping it. Collect exactly once — if you dispatch subagents, hand them the
+   same context file and a file subset; never let them re-run this collector.
 2. ${analyzers}
-3. Read each changed file's enclosing scope and call sites of changed signatures.
+3. Read the diff from the context file. It already carries surrounding lexical
+   scope, so open a changed file only for a call site or definition the diff
+   does not contain; prefer Grep over whole-file reads.
 4. Analyze every hunk against these vectors: ${vectors}.
    Report only issues caused or exposed by the diff, each with a concrete
    failure scenario.
@@ -342,6 +348,11 @@ export async function runReview({ flags, stdout, stderr, env, cwd }) {
     // to the (third-party) host agent silently didn't hold. Empty string
     // when unset so collect-context.sh's own default (".") applies.
     FERRET_DIR_PATHSPEC: pathspec ?? "",
+    // Keep the diff payload on disk instead of in the host agent's transcript;
+    // collection is the dominant token cost of a review. Guidelines are NOT
+    // skipped here: the host may be codex or gemini, which do not necessarily
+    // load CLAUDE.md/AGENTS.md themselves.
+    FERRET_OUT: ".ferret/context.txt",
   };
   const prompt = buildPrompt({
     target: scope.target,
