@@ -380,6 +380,24 @@ grep -q 'plan-shards.sh' "$ROOT/commands/review.md" || fail "/review must source
 grep -qi 'must NOT re-run the collector' "$ROOT/commands/review.md" \
   || fail "/review must tell agents not to re-collect"
 
+# Shards are split by FILE, and every agent runs every vector on its own files.
+# Splitting by vector instead covers only 1/Nth of the file x vector matrix:
+# measured on a 23-file diff with 12 planted bugs it recalled 6/12, because an
+# agent that spots a defect outside "its" vector drops it and no other agent is
+# ever shown that file. These assertions keep the two from being confused again.
+grep -qi 'ALL FIVE' "$AGENT" \
+  || fail "ferret-reviewer must apply all five vectors to its shard, not one vector"
+grep -qi 'never by vector' "$AGENT" \
+  || fail "ferret-reviewer must state that shards split by file, not vector"
+grep -qi 'never drop a finding because it feels like it belongs to a different vector' "$AGENT" \
+  || fail "ferret-reviewer must forbid dropping out-of-vector findings"
+grep -qi 'per .*file shard' "$ROOT/commands/review.md" \
+  || fail "/review must fan out per file shard"
+grep -qi 'Shard by file, never by vector' "$ROOT/commands/review.md" \
+  || fail "/review must warn against per-vector sharding"
+[[ "$(grep -ci 'one per vector' "$ROOT/commands/review.md")" -eq 0 ]] \
+  || fail "/review must no longer instruct one agent per vector"
+
 python3 "$ROOT/tests/test_run_tools.py"
 
 printf 'CodeFerret shell integration tests passed.\n'

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.2 — Fan-out reviewed a fifth of what it claimed
+
+### Fixed
+
+- **The fan-out covered 1/N of the file×vector matrix.** 0.3.0 shipped
+  "one `ferret-reviewer` per vector", each handed one file shard. That reads as
+  five specialists covering the diff; it is actually five specialists each
+  seeing a fifth of the files and checking a fifth of the vectors. A defect
+  whose vector was assigned to a different shard was never looked for.
+
+  Shards now split by **file**, and every agent applies **all five vectors** to
+  its own slice. Same token cost — each file's diff still enters exactly one
+  agent's context — with full coverage instead of a fifth.
+
+  Measured on a 23-file diff with 12 bugs planted across all five vectors,
+  reviewed by five real subagents:
+
+  | | recall |
+  |---|---|
+  | per-vector shards (0.3.0/0.3.1) | 6/12 (50%) |
+  | per-file shards (0.3.2) | **12/12 (100%)** |
+
+  A missed SQL injection in `auth.py` was the worst case: the file went to the
+  API agent, and the SECURITY agent was never shown it. The clearest evidence
+  was `cache_init.py`, where the LOGIC agent spotted the removed lock, wrote
+  that it "falls under the CONCURRENCY vector, not LOGIC", and dropped it
+  exactly as instructed — while no other agent would ever see that file.
+
+  `ferret-reviewer` now states that it is the only reviewer for its files and
+  must never drop a finding for belonging to another vector.
+
+### Testing
+
+- Six assertions pin the corrected topology: the agent must apply all five
+  vectors, must say shards split by file rather than vector, and must forbid
+  dropping out-of-vector findings; `/review` must fan out per file shard, must
+  warn against per-vector sharding, and must no longer contain the phrase "one
+  per vector". Each verified to fail under targeted sabotage.
+- The collect-once contract was verified live rather than by inspection: the
+  installed collector was wrapped in a logging shim for both fan-out runs, and
+  recorded zero re-invocations by agents across all ten dispatches.
+
 ## 0.3.1 — Secret scanner missed mid-identifier keywords
 
 ### Fixed

@@ -42,7 +42,7 @@ Steps:
    PERFORMANCE, API.
 
    For a large diff (>15 files), fan out to `ferret-reviewer` subagents — one
-   per vector, in a single parallel batch. Get the file subsets from:
+   per **file shard**, in a single parallel batch. Get the shards from:
 
    ```
    bash ${CLAUDE_PLUGIN_ROOT}/scripts/plan-shards.sh <target> 5
@@ -52,6 +52,15 @@ Steps:
    agent gets stuck with most of the diff. Give each agent one line plus the
    `.ferret/context.txt` path. Agents must NOT re-run the collector: collecting
    once and sharding is what keeps a fan-out review from costing N× the diff.
+
+   **Shard by file, never by vector.** Every agent applies all five vectors to
+   its own files. One-agent-per-vector looks equivalent and is not: it shows
+   each vector only its own shard, so the review covers a fifth of the
+   file×vector matrix and a defect whose vector was assigned to a different
+   shard is never looked for. Measured on a 23-file diff with 12 planted bugs,
+   per-vector sharding recalled 6/12 — one agent explicitly identified a race
+   condition and dropped it as "another vector's job" when no other agent would
+   ever see that file.
 
    Otherwise review inline; do not spawn agents for a small diff, where the
    fan-out overhead exceeds the work.

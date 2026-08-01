@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "code-ferret",
   "display_name": "CodeFerret",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Diff-scoped semantic code review: bug hunting across logic, security, concurrency, performance, and API-contract vectors.",
   "long_description": "CodeFerret reviews git diffs — never whole repositories — across five detection vectors (LOGIC, SECURITY, CONCURRENCY, PERFORMANCE, API) with confidence scoring, linter deduplication, a false-positive suppression cache, and a secret scanner. The host model performs the semantic analysis, so it works with any frontier model. Use the bundled 'review', 'precommit', and 'triage' prompts to drive it.",
   "author": {

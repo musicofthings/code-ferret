@@ -1,6 +1,6 @@
 {
   "name": "code-ferret",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Diff-scoped semantic code review: bug hunting across logic, security, concurrency, performance, and API-contract vectors.",
   "contextFileName": "GEMINI.md",
   "mcpServers": {
