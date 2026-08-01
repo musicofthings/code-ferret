@@ -275,6 +275,111 @@ set -e
 [[ "$CONFIGURED_STATUS" -eq 1 ]] || fail "configured native hook should block staged secret"
 assert_contains "$CONFIGURED_OUTPUT" "commit blocked"
 
+# --- fan-out path ------------------------------------------------------------
+# A >15-file diff is reviewed by one ferret-reviewer per vector. The whole point
+# of that path is that the diff is collected ONCE and split, so total cost stays
+# ~= the diff instead of (vectors x diff). These assertions pin the economics
+# and the partition; a regression here is invisible in output but multiplies the
+# token cost of every large review.
+FAN="$TEST_TMP/fanout"
+mkdir -p "$FAN"
+git -C "$FAN" init -q .
+git -C "$FAN" config user.email fan@example.com
+git -C "$FAN" config user.name Fan
+
+# 20 files whose DIFFS are deliberately uneven -- file i gains i*20 lines, a
+# 20x spread. Varying file size instead would prove nothing: plan-shards.sh
+# weights by diff size, so twenty large files each gaining one line all weigh
+# the same and any splitter looks balanced.
+mkdir -p "$FAN/src"
+python3 - "$FAN" baseline <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for i in range(1, 21):
+    (root / "src" / f"mod{i}.py").write_text(f"def mod{i}(x):\n    return x\n")
+(root / "package-lock.json").write_text('{"lockfileVersion":3,"packages":{}}\n')
+PY
+git -C "$FAN" add -A
+git -C "$FAN" commit -qm "fanout baseline"
+FAN_BASE="$(git -C "$FAN" rev-parse HEAD)"
+
+python3 - "$FAN" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for i in range(1, 21):
+    p = root / "src" / f"mod{i}.py"
+    body = "".join(f"    v{j} = {j}\n" for j in range(1, i * 20 + 1))
+    p.write_text(p.read_text() + body)
+PY
+python3 - "$FAN/package-lock.json" <<'PY'
+import json, sys
+d = {"lockfileVersion": 3, "packages": {}}
+for i in range(300):
+    d["packages"][f"node_modules/p{i}"] = {"version": f"1.0.{i}", "integrity": "sha512-" + "B" * 64}
+open(sys.argv[1], "w").write(json.dumps(d, indent=2))
+PY
+git -C "$FAN" add -A
+git -C "$FAN" commit -qm "fanout change"
+
+FAN_FILES="$(git -C "$FAN" diff "$FAN_BASE...HEAD" --name-only | grep -c .)"
+[[ "$FAN_FILES" -gt 15 ]] || fail "fan-out fixture must exceed the 15-file threshold (got $FAN_FILES)"
+
+FAN_PLAN="$(cd "$FAN" && bash "$ROOT/scripts/plan-shards.sh" "$FAN_BASE" 5)"
+FAN_SHARDS="$(printf '%s\n' "$FAN_PLAN" | grep -c .)"
+[[ "$FAN_SHARDS" -eq 5 ]] || fail "expected 5 shards for a 5-vector fan-out, got $FAN_SHARDS"
+
+# Partition: every reviewable file appears in exactly one shard, lockfile in none.
+FAN_PLANNED="$(printf '%s\n' "$FAN_PLAN" | tr ':' '\n' | grep . | sort)"
+FAN_TRUTH="$(git -C "$FAN" diff "$FAN_BASE...HEAD" --name-only | grep -v package-lock.json | sort)"
+[[ "$FAN_PLANNED" == "$FAN_TRUTH" ]] || fail "shard plan must cover every reviewable file exactly once"
+[[ "$(printf '%s\n' "$FAN_PLANNED" | sort -u | wc -l)" -eq "$(printf '%s\n' "$FAN_PLANNED" | wc -l)" ]] \
+  || fail "a file appears in more than one shard"
+[[ "$FAN_PLAN" != *package-lock.json* ]] || fail "lockfile must not consume a shard"
+
+# Economics: collecting per shard must total ~one collection, never 5x it.
+FAN_WHOLE="$(cd "$FAN" && bash "$ROOT/scripts/collect-context.sh" "$FAN_BASE" 2>/dev/null | wc -c)"
+FAN_SUM=0; FAN_MAX=0
+while IFS= read -r shard; do
+  [[ -z "$shard" ]] && continue
+  n="$(cd "$FAN" && FERRET_FILES="$shard" bash "$ROOT/scripts/collect-context.sh" "$FAN_BASE" 2>/dev/null | wc -c)"
+  FAN_SUM=$(( FAN_SUM + n ))
+  [[ "$n" -gt "$FAN_MAX" ]] && FAN_MAX="$n"
+done <<< "$FAN_PLAN"
+[[ "$FAN_SUM" -lt $(( FAN_WHOLE * 2 )) ]] \
+  || fail "sharded collection ($FAN_SUM) must stay near one whole collection ($FAN_WHOLE), not a multiple"
+# Balanced packing. Threshold is empirical, not a guess: on this fixture the
+# shipped longest-processing-time-first packer puts 20% of the bytes in its
+# fattest shard (20% is the floor for 5 shards), while a size-blind round-robin
+# by filename puts 25%. 23% sits between them, so this fails if the packer
+# regresses to name order and passes with ~3pp of headroom otherwise.
+# Wall-clock for a fan-out is set by the fattest shard, so this is the assertion
+# that protects the parallelism, not just the token total.
+[[ $(( FAN_MAX * 100 )) -lt $(( FAN_SUM * 23 )) ]] \
+  || fail "fattest shard is $(( FAN_MAX * 100 / FAN_SUM ))% of the total; expected <23% (size-blind splitting gives ~25%)"
+
+# Each shard must be independently reviewable: its own files present, others absent.
+FAN_FIRST="$(printf '%s\n' "$FAN_PLAN" | head -1)"
+FAN_FIRST_CTX="$(cd "$FAN" && FERRET_FILES="$FAN_FIRST" bash "$ROOT/scripts/collect-context.sh" "$FAN_BASE" 2>/dev/null)"
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  assert_contains "$FAN_FIRST_CTX" "+++ b/$f"
+done < <(printf '%s\n' "$FAN_FIRST" | tr ':' '\n' | grep .)
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  [[ "$FAN_FIRST_CTX" != *"+++ b/$f"* ]] || fail "shard leaked a file from another shard: $f"
+done < <(printf '%s\n' "$FAN_PLAN" | tail -n +2 | tr ':' '\n' | grep .)
+
+# The reviewer agent's contract is what keeps the fan-out cheap and on-model.
+AGENT="$ROOT/agents/ferret-reviewer.md"
+grep -q '^model: sonnet' "$AGENT" || fail "ferret-reviewer must pin a model, else N agents inherit the session model"
+grep -q '^effort: high' "$AGENT"  || fail "ferret-reviewer must pin an effort level"
+grep -q '^tools: '      "$AGENT"  || fail "ferret-reviewer must declare its tools"
+grep -qi 'do NOT re-run' "$AGENT" || fail "ferret-reviewer must forbid re-running the collector"
+grep -qi 'FERRET_FILES' "$AGENT"  || fail "ferret-reviewer must document shard-scoped collection"
+grep -q 'plan-shards.sh' "$ROOT/commands/review.md" || fail "/review must source shards from plan-shards.sh"
+grep -qi 'must NOT re-run the collector' "$ROOT/commands/review.md" \
+  || fail "/review must tell agents not to re-collect"
+
 python3 "$ROOT/tests/test_run_tools.py"
 
 printf 'CodeFerret shell integration tests passed.\n'
